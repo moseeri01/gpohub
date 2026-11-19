@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "m_21"
+local VERSION = "m_22"
 
 -- Every thread the hub starts runs inside pcall. The game's anti-cheat listens to ScriptContext.Error and sends the
 -- text of errors from scripts that are not its own to the server (read in the decompiled "anti" module), so an
@@ -1799,6 +1799,35 @@ do
                 diag.attrs = table.concat(at, " ")
             end
             diag.marks = table.concat(marks, " ")
+            -- what is around the character: 8 rays at waist height (studs to the first solid part + its name),
+            -- one at head height forward of each, and the part under the feet
+            if r then
+                local rp = RaycastParams.new()
+                rp.FilterType = Enum.RaycastFilterType.Exclude
+                local ign = { c }
+                for _, n in ipairs({ "Effects", "PlayerCharacters", "Projectiles" }) do
+                    local f = workspace:FindFirstChild(n)
+                    if f then ign[#ign + 1] = f end
+                end
+                rp.FilterDescendantsInstances = ign
+                local names = { "+X", "+X-Z", "-Z", "-X-Z", "-X", "-X+Z", "+Z", "+X+Z" }
+                local dirs = { Vector3.new(1, 0, 0), Vector3.new(1, 0, -1), Vector3.new(0, 0, -1), Vector3.new(-1, 0, -1),
+                    Vector3.new(-1, 0, 0), Vector3.new(-1, 0, 1), Vector3.new(0, 0, 1), Vector3.new(1, 0, 1) }
+                local out = {}
+                for i, d in ipairs(dirs) do
+                    local function cast(from)
+                        local hit = workspace:Raycast(from, d.Unit * 25, rp)
+                        if not hit then return "open" end
+                        return string.format("%.0f %s%s", (hit.Position - from).Magnitude, hit.Instance.Name:sub(1, 14), hit.Instance.CanCollide and "" or "(nc)")
+                    end
+                    out[#out + 1] = names[i] .. ": " .. cast(r.Position) .. " / hi " .. cast(r.Position + Vector3.new(0, 4, 0)) .. " / lo " .. cast(r.Position - Vector3.new(0, 2, 0))
+                end
+                local dn = workspace:Raycast(r.Position, Vector3.new(0, -12, 0), rp)
+                out[#out + 1] = "down: " .. (dn and string.format("%.1f %s [%s]", (dn.Position - r.Position).Magnitude, dn.Instance:GetFullName():sub(-60), dn.Instance.ClassName) or "nothing")
+                local up = workspace:Raycast(r.Position, Vector3.new(0, 20, 0), rp)
+                out[#out + 1] = "up: " .. (up and string.format("%.1f %s", (up.Position - r.Position).Magnitude, up.Instance.Name) or "open")
+                diag.rays = out
+            end
             diag.moveWay = C.moveWay
         end)
         return {
