@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "m_26"
+local VERSION = "m_27"
 
 -- Every thread the hub starts runs inside pcall. The game's anti-cheat listens to ScriptContext.Error and sends the
 -- text of errors from scripts that are not its own to the server (read in the decompiled "anti" module), so an
@@ -691,6 +691,14 @@ do
         F.status = "Walking to " .. what .. " (" .. tostring(p.ObjectText) .. ")"
         local reach = math.max(2, (p.MaxActivationDistance or 10) - 2)
         if C.walkTo(pos, reach, 25, function() return not p.Parent end) and p.Parent then
+            -- real 3D distance: the walk now measures flat, and a prompt on a ledge above / below is out of the
+            -- game's range even when we stand "at" it (20:53: two chests pressed again and again, nothing opened)
+            local r = C.root()
+            local d3 = r and (r.Position - pos).Magnitude or 999
+            if d3 > (p.MaxActivationDistance or 10) + 1 then
+                log(string.format("%s: %s out of reach (%.0f away, mostly height)", what, tostring(p.ObjectText), d3))
+                return false, "far"
+            end
             C.press(p)
             log(what .. ": " .. tostring(p.ObjectText))
             return true
@@ -970,7 +978,7 @@ do
         local best, bestD = nil, maxDist
         for p in pairs(ID.prompts) do
             local again = ID.pressed[p]
-            if p.Parent and p.Enabled and kindOf(p) == want and not (again and os.clock() - again < 8) then
+            if p.Parent and p.Enabled and not ID.skip[p] and kindOf(p) == want and not (again and os.clock() - again < 8) then
                 local pos = C.promptPos(p)
                 local d = pos and (pos - r.Position).Magnitude
                 if d and d < bestD then best, bestD = p, d end
@@ -990,11 +998,21 @@ do
     }
     -- a pressed prompt is left alone for 8 s (m_2 pressed the same chest several times) and counted once
     ID.pressed = setmetatable({}, { __mode = "k" })
+    -- a prompt that is still there after 2 presses, or could not be reached twice, is left alone for good
+    ID.tries = setmetatable({}, { __mode = "k" })
+    ID.skip = setmetatable({}, { __mode = "k" })
     local function use(p, what, counter)
         local first = ID.pressed[p] == nil
+        ID.tries[p] = (ID.tries[p] or 0) + 1
         if C.usePrompt(p, what) then
             ID.pressed[p] = os.clock()
             if first then ID.done[counter] = ID.done[counter] + 1 end
+        end
+        if ID.tries[p] >= 2 and what ~= "key" then
+            ID.skip[p] = true
+            task.delay(3, function()
+                if p.Parent then log(what .. " ignored after 2 tries: " .. tostring(p.ObjectText)) end
+            end)
         end
     end
     function ID.count() local n = 0 for _ in pairs(ID.prompts) do n = n + 1 end return n end
