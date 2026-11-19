@@ -25,7 +25,7 @@ while not LP do task.wait(0.2) LP = Players.LocalPlayer end
 task.wait(0.3)
 if G.__gpo_hub_seq ~= MY_SEQ then return end
 local FOLDER = "gpohub"
-local VERSION = "k_2"
+local VERSION = "k_3"
 
 -- Exact build. GitHub serves the main file from a cache for about 5 minutes, so a hub loaded right after a push
 -- can be an older build. gpohub/want.txt (written at push time on this PC) names the commit to run; a hub that
@@ -2427,7 +2427,9 @@ do
         F.conns[#F.conns + 1] = UIS2.WindowFocused:Connect(function() R.focused = "yes" end)
         F.conns[#F.conns + 1] = UIS2.WindowFocusReleased:Connect(function() R.focused = "no" end)
     end)
-    local CMD, STATE = FOLDER .. "/cmd.txt", FOLDER .. "/state.json"
+    -- commands now come from cmd2.txt: older hub copies that cannot be stopped (builds before one_1 had no
+    -- single-instance check) keep reading cmd.txt and must not see new commands
+    local CMD, STATE = FOLDER .. "/cmd2.txt", FOLDER .. "/state.json"
     local LOADER = "https://raw.githubusercontent.com/moseeri01/gpohub/main/gpo_hub.lua"
 
     local function setCfg(key, value)
