@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "g_3"
+local VERSION = "g_4"
 
 -- Every thread the hub starts runs inside pcall. The game's anti-cheat listens to ScriptContext.Error and sends the
 -- text of errors from scripts that are not its own to the server (read in the decompiled "anti" module), so an
@@ -1264,7 +1264,8 @@ do
         -- Start room ("GEAR UP AND FIND A WAY OUT"): loot for at most 4 minutes, then only what lies within 40 studs,
         -- and head for the first wave. The hand run (17:50) walked 2984,-13576 -> 2965,-13691 -> 2939,-13806 ->
         -- 2950,-13881, fought guards around 2940,-13900 and got "PROCEED THROUGH THE MAZE" at 2947,-13961.
-        local gear = ID.stage:find("GEAR UP", 1, true) ~= nil
+        -- stage unknown ("-": hub loaded mid-run before the stage file existed) and not in the maze area = start room
+        local gear = ID.stage:find("GEAR UP", 1, true) ~= nil or (ID.stage == "-" and not ID.inMaze())
         if gear and not ID.gearT then ID.gearT = os.clock() end
         local hurry = gear and ID.gearT and (os.clock() - ID.gearT > 240 or (F.cfg.idGear and ID.kitDone()))
         if hurry and not ID.hurryLogged then ID.hurryLogged = true log("gear: kit done or time up (" .. ID.kitLine() .. ") - no more far chests") end
