@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "m_5"
+local VERSION = "m_6"
 
 local F = {
     alive = true,
@@ -1025,6 +1025,30 @@ do
                 log("status: " .. s .. (r and string.format("  @ %.0f,%.0f,%.0f", r.Position.X, r.Position.Y, r.Position.Z) or ""))
             end
             task.wait(0.5)
+        end
+    end)
+
+    -- one-time probe (m_6): the game's own input scripts sit in the Backpack and were not in the Watch dump.
+    -- Sprint (double W), dash (Q) and M1 are handled there; reading them replaces guessing. Written once per
+    -- script to gpohub/src/<name>_<place>.lua. Only reads (decompile), sends nothing.
+    task.delay(12, function()
+        if not F.alive or type(decompile) ~= "function" or not canFiles then return end
+        local bp = LP:FindFirstChild("Backpack")
+        if not bp then return end
+        pcall(function() if type(makefolder) == "function" and not isfolder(FOLDER .. "/src") then makefolder(FOLDER .. "/src") end end)
+        for _, name in ipairs({ "Movements", "MeleeScript", "MovementPhysics", "ImpelClient", "InputCallbacks", "Glide" }) do
+            local sc = bp:FindFirstChild(name)
+            local file = FOLDER .. "/src/" .. name .. "_" .. tostring(game.PlaceId) .. ".lua"
+            if sc and sc:IsA("LuaSourceContainer") and not isfile(file) then
+                local ok, src = pcall(decompile, sc)
+                if ok and type(src) == "string" and #src > 0 then
+                    pcall(writefile, file, "-- " .. sc:GetFullName() .. "\n" .. src)
+                    log("probe: saved " .. name .. " (" .. #src .. " chars)")
+                else
+                    log("probe: could not read " .. name)
+                end
+                task.wait(0.5)
+            end
         end
     end)
 
