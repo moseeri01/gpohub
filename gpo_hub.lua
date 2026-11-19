@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "m_7"
+local VERSION = "m_8"
 
 local F = {
     alive = true,
@@ -1070,6 +1070,44 @@ do
         end
         pcall(writefile, dir .. "/_index.txt", table.concat(index, "\n") .. "\n")
         log("probe: read " .. ok_n .. " of " .. #list .. " player scripts into " .. dir)
+    end)
+
+    -- quest NPC positions (m_8): the game's own quest tracker asks the server for them once at start with
+    -- Events.Quest:InvokeServer({"getQuestLocations"}) and gets a table  NPC name -> CFrame  (read in the decompiled
+    -- QuestTracker). Same call here, once per place, saved to gpohub/quest_locations_<placeId>.json.
+    S.locations = {}
+    task.delay(15, function()
+        if not F.alive then return end
+        local file = FOLDER .. "/quest_locations_" .. tostring(game.PlaceId) .. ".json"
+        local okr = pcall(function()
+            if canFiles and isfile(file) then
+                local d = HttpService:JSONDecode(readfile(file))
+                for name, p in pairs(d) do S.locations[name] = Vector3.new(p[1], p[2], p[3]) end
+            end
+        end)
+        if okr and next(S.locations) then return end
+        local evs = RS:FindFirstChild("Events")
+        local q = evs and evs:FindFirstChild("Quest")
+        if not (q and q:IsA("RemoteFunction")) then return end
+        local okc, res = pcall(function() return q:InvokeServer({ "getQuestLocations" }) end)
+        if not okc or type(res) ~= "table" then
+            log("quest locations: no answer (" .. tostring(res):sub(1, 60) .. ")")
+            return
+        end
+        local out, n = {}, 0
+        for name, v in pairs(res) do
+            local pos = (typeof(v) == "CFrame" and v.Position) or (typeof(v) == "Vector3" and v) or nil
+            if pos and type(name) == "string" then
+                S.locations[name] = pos
+                out[name] = { math.floor(pos.X * 10) / 10, math.floor(pos.Y * 10) / 10, math.floor(pos.Z * 10) / 10 }
+                n = n + 1
+            end
+        end
+        if canFiles and n > 0 then
+            ensureFolder()
+            pcall(function() writefile(file, HttpService:JSONEncode(out)) end)
+        end
+        log("quest locations: " .. n .. " NPC positions from the game")
     end)
 
     -- account values: the game keeps them in ReplicatedStorage["Stats" .. name] (seen in scans and in the game's
