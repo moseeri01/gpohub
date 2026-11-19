@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "w_1"
+local VERSION = "w_2"
 
 local F = {
     alive = true,
@@ -917,11 +917,17 @@ UI.toggle(fs, "Fight Megalodon if it spawns", cfgGet("fishMegalodon"), cfgSet("f
 -- Level
 local level = UI.page("Level", 7)
 local mf = UI.card(level, 1, "Mob farm (works now)")
+UI.toggle(mf, "Walk to mobs and fight", function() return F.running and F.cfg.mode == "Mobs" end, function(v)
+    if v then F.cfg.mode = "Mobs" saveAll() end
+    F.running = v
+    F.status = v and "Starting" or "Idle"
+    log(v and "start Mobs" or "stop")
+end)
 UI.input(mf, "Mob names", "blank = any mob, or: Bandit, Marine", cfgGet("mobNames"), cfgSet("mobNames"))
 UI.stepper(mf, "Look within", 20, 300, cfgGet("mobRange"), cfgSet("mobRange"), 20)
 UI.toggle(mf, "Use skills Z / X / C", cfgGet("mobSkills"), cfgSet("mobSkills"))
 UI.info(mf, "Kills", function() return F.world and tostring(F.world.kills) or "0" end)
-UI.note(mf, "Home: Mode Mobs + Start. Stand near the mobs first. Walks only, no quests yet.")
+UI.note(mf, "Stand near the mobs first. Walks only, no quests yet. Same as Home: Mode Mobs + Start.")
 local dq = UI.card(level, 2, "Daily quests (read only)")
 for i = 1, 4 do
     UI.info(dq, i == 4 and "Status" or ("Quest " .. i), function()
