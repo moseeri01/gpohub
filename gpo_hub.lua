@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "m_24"
+local VERSION = "m_25"
 
 -- Every thread the hub starts runs inside pcall. The game's anti-cheat listens to ScriptContext.Error and sends the
 -- text of errors from scripts that are not its own to the server (read in the decompiled "anti" module), so an
@@ -719,14 +719,35 @@ do
         return best, bestD
     end
 
+    -- Weapons are Tools with attribute Category = "Weapons" (scans): swords have no MeleeTool flag, fighting styles
+    -- have MeleeTool = true, fruits also devilFruit = true. The hub used to look for a tool named "Melee" only;
+    -- an account with a named style (Rokushiki ...) held nothing and canAutoM1() was false (Vera fight, 20:48).
+    -- Order: keep a weapon already in hand; else sword, else fighting style, else fruit.
+    local function weaponRank(t)
+        if not t:IsA("Tool") or t:GetAttribute("Category") ~= "Weapons" then return nil end
+        if t:GetAttribute("devilFruit") then return 3 end
+        if t:GetAttribute("MeleeTool") then return 2 end
+        return 1
+    end
     function C.holdWeapon()
         local c = LP.Character
         if not c then return nil end
-        local t = c:FindFirstChildOfClass("Tool")
-        if t then return t end
+        local held = c:FindFirstChildOfClass("Tool")
+        if held and weaponRank(held) then return held end
         local bp = LP:FindFirstChild("Backpack")
-        local pick = bp and bp:FindFirstChild("Melee")
-        if pick and C.hum() then pcall(function() C.hum():EquipTool(pick) end) task.wait(0.2) end
+        local pick, best = nil, 99
+        if bp then
+            for _, t in ipairs(bp:GetChildren()) do
+                local rk = weaponRank(t)
+                if rk and rk < best then pick, best = t, rk end
+            end
+            pick = pick or bp:FindFirstChild("Melee")
+        end
+        if pick and C.hum() then
+            pcall(function() C.hum():EquipTool(pick) end)
+            if C.lastEquip ~= pick.Name then C.lastEquip = pick.Name log("equip: " .. pick.Name) end
+            task.wait(0.3)
+        end
         return c:FindFirstChildOfClass("Tool")
     end
 
