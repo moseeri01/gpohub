@@ -1,5 +1,5 @@
 -- moseeri gpo: hub window for Grand Piece Online (2026-11-19).
--- Window kit copied from moseeri nexus (NexusFarm.lua). Built by build.ps1 from src/head.lua + kit + impel + pages.
+-- Window kit copied from moseeri nexus (NexusFarm.lua). Built by build.ps1 from src/head.lua + kit + core + impel + world + pages.
 -- Lua 5.1 only. Every callback runs in pcall. Fires no game remotes: the Impel Down part walks, presses
 -- proximity prompts and swings the held tool like a player. Settings in Workspace/gpohub/config.json.
 
@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "id_1"
+local VERSION = "w_1"
 
 local F = {
     alive = true,
@@ -28,6 +28,7 @@ local F = {
         hover = false, freezeMobs = false,
         -- Impel Down
         idDiff = "Nightmare", idSolo = true, idSecret = true, idRequeue = true, idBuy = "Nothing", idKeep = 200000,
+        mobNames = "", mobRange = 80, mobSkills = false, fruitAlert = true,
         idCuffs = true, idChests = true, idLoot = true, idSkipJunk = true, idFight = true, idFightRange = 40, idSkills = false,
         -- Boss
         bossHop = false, bossList = { Juzo = true },
@@ -362,104 +363,61 @@ local function cfgSet(key) return function(v) F.cfg[key] = v saveAll() end end
 local function cfgGet(key) return function() return F.cfg[key] end end
 
 --------------------------------------------------------------------------------
--- Impel Down engine (id_1, 2026-11-19) - only what the recorder has seen in real runs:
---   cuffs  : char has "Cuffed"; prompt "Use" on "<me>'s Handcuff Key" in Workspace.Effects
---   chests : prompt "Open" on "Common Chest" / "Rare Chest" in Workspace.Effects
---   loot   : drops are Models in Workspace.Effects with attribute brItem=true, prompt "Grab"
---   guards : Workspace.NPCs."Impel Guard" (63 hp, sword + gun, come in groups)
---   stage  : ReplicatedStorage.matchEvents("waveInfo", text, nil, "ImpelDown") - listened to, never fired
--- Moves only by walking (Humanoid:MoveTo along a path). Nothing is teleported. The maze route, the vote,
--- the end of the run and dying are NOT handled yet (never recorded).
+-- core: shared moves for every mode (2026-11-19). Walk only (Humanoid:MoveTo along a path), press
+-- proximity prompts, swing the held tool. The game checks speed / noclip on the server
+-- (SpeedBypass / NoclipBypass attributes seen in recordings), so nothing here teleports or flies.
 --------------------------------------------------------------------------------
+local C = {}
+F.core = C
 do
-    local ID = { PLACE = 11424731604, prompts = {}, stage = "-", busy = false, done = { chests = 0, loot = 0, keys = 0 } }
-    F.impel = ID
-    local RS = game:GetService("ReplicatedStorage")
     local PFS = game:GetService("PathfindingService")
     local VIM = nil
     pcall(function() VIM = game:GetService("VirtualInputManager") end)
-    local JUNK = { ["Wooden Plank"] = true }
+    C.VIM = VIM
 
-    function ID.inRaid() return game.PlaceId == ID.PLACE end
-    local function char() return LP.Character end
-    local function root() local c = char() return c and c:FindFirstChild("HumanoidRootPart") end
-    local function hum() local c = char() return c and c:FindFirstChildOfClass("Humanoid") end
-    local function alive() local h = hum() return h and h.Health > 0 end
-    local function where(o)
+    function C.char() return LP.Character end
+    function C.root() local c = LP.Character return c and c:FindFirstChild("HumanoidRootPart") end
+    function C.hum() local c = LP.Character return c and c:FindFirstChildOfClass("Humanoid") end
+    function C.alive() local h = C.hum() return h ~= nil and h.Health > 0 end
+    function C.hpPct() local h = C.hum() return h and h.MaxHealth > 0 and (h.Health / h.MaxHealth * 100) or 0 end
+
+    function C.where(o)
         if o:IsA("BasePart") then return o.Position end
         if o:IsA("Model") then local ok, cf = pcall(function() return o:GetPivot() end) return ok and cf.Position or nil end
         if o:IsA("Attachment") then return o.WorldPosition end
         return nil
     end
-    local function promptPos(p)
+    function C.promptPos(p)
         local a = p.Parent
         while a and a ~= workspace do
-            local v = where(a)
+            local v = C.where(a)
             if v then return v end
             a = a.Parent
         end
         return nil
     end
 
-    -- stage text from the server (listen only)
-    task.spawn(function()
-        local ev = RS:WaitForChild("matchEvents", 30)
-        if not ev or not F.alive then return end
-        F.conns[#F.conns + 1] = ev.OnClientEvent:Connect(function(kind, text, _, mode)
-            if kind == "waveInfo" and type(text) == "string" then
-                ID.stage = text
-                log("impel stage: " .. text .. " (" .. tostring(mode) .. ")")
-            end
-        end)
-    end)
-
-    -- keep a list of prompts in Workspace.Effects instead of scanning every tick
-    local function addPrompt(p) if p:IsA("ProximityPrompt") then ID.prompts[p] = true end end
-    task.spawn(function()
-        if not ID.inRaid() then return end
-        local fx = workspace:WaitForChild("Effects", 30)
-        if not fx or not F.alive then return end
-        for _, d in ipairs(fx:GetDescendants()) do addPrompt(d) end
-        F.conns[#F.conns + 1] = fx.DescendantAdded:Connect(addPrompt)
-        F.conns[#F.conns + 1] = fx.DescendantRemoving:Connect(function(d) ID.prompts[d] = nil end)
-    end)
-
-    -- which job a prompt is: "key" / "chest" / "loot" / nil
-    local function kindOf(p)
-        local act, obj = p.ActionText or "", p.ObjectText or ""
-        if act == "Use" and obj == (LP.Name .. "'s Handcuff Key") then return "key" end
-        if act == "Open" and obj:match("Chest$") then return "chest" end
-        if act == "Grab" then
-            local m = p:FindFirstAncestorOfClass("Model")
-            if m and m:GetAttribute("brItem") == true then
-                if F.cfg.idSkipJunk and JUNK[obj] then return nil end
-                return "loot"
+    -- another player close by (Settings: stop when a player is near)
+    function C.playerNear(dist)
+        local r = C.root()
+        if not r then return nil end
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LP and p.Character then
+                local pr = p.Character:FindFirstChild("HumanoidRootPart")
+                if pr and (pr.Position - r.Position).Magnitude < dist then return p end
             end
         end
         return nil
     end
-    local function nearestPrompt(want, maxDist)
-        local r = root()
-        if not r then return nil end
-        local best, bestD = nil, maxDist or 400
-        for p in pairs(ID.prompts) do
-            if p.Parent and p.Enabled and kindOf(p) == want then
-                local pos = promptPos(p)
-                local d = pos and (pos - r.Position).Magnitude
-                if d and d < bestD then best, bestD = p, d end
-            end
-        end
-        return best, bestD
-    end
 
-    -- walk (never teleport). Gives up after `limit` seconds or when stop() says so.
-    function ID.walkTo(pos, near, limit, stop)
-        local h, r = hum(), root()
+    -- walk to pos; false on timeout, stuck, stop() or Start turned off
+    function C.walkTo(pos, near, limit, stop)
+        local h, r = C.hum(), C.root()
         if not h or not r then return false end
         near = near or 4
         local t0 = os.clock()
         local points = { pos }
-        local ok = pcall(function()
+        pcall(function()
             local path = PFS:CreatePath({ AgentRadius = 2.5, AgentHeight = 5, AgentCanJump = true, WaypointSpacing = 6 })
             path:ComputeAsync(r.Position, pos)
             if path.Status == Enum.PathStatus.Success then
@@ -467,13 +425,12 @@ do
                 for _, w in ipairs(path:GetWaypoints()) do points[#points + 1] = w end
             end
         end)
-        if not ok then points = { pos } end
         for _, w in ipairs(points) do
             local target = typeof(w) == "Vector3" and w or w.Position
             if typeof(w) ~= "Vector3" and w.Action == Enum.PathWaypointAction.Jump then h.Jump = true end
             local lastPos, stuck = r.Position, 0
-            while F.alive and F.running and alive() do
-                r = root()
+            while F.alive and F.running and C.alive() do
+                r = C.root()
                 if not r then return false end
                 if (r.Position - pos).Magnitude <= near then return true end
                 if (r.Position - target).Magnitude <= 3 then break end
@@ -489,109 +446,188 @@ do
                 lastPos = r.Position
             end
         end
-        r = root()
+        r = C.root()
         return r ~= nil and (r.Position - pos).Magnitude <= near + 2
     end
 
-    -- press a prompt: fireproximityprompt when the executor has it, else hold E next to it
-    function ID.press(p)
-        if type(fireproximityprompt) == "function" then
-            local ok = pcall(fireproximityprompt, p)
-            if ok then task.wait(0.3) return true end
-        end
-        if not VIM then return false end
+    function C.key(k, hold)
+        if not VIM then return end
         pcall(function()
-            VIM:SendKeyEvent(true, Enum.KeyCode.E, false, game)
-            task.wait((p.HoldDuration or 0) + 0.15)
-            VIM:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+            VIM:SendKeyEvent(true, k, false, game)
+            task.wait(hold or 0.1)
+            VIM:SendKeyEvent(false, k, false, game)
         end)
+    end
+
+    -- press a prompt: fireproximityprompt when the executor has it, else hold E next to it
+    function C.press(p)
+        if type(fireproximityprompt) == "function" and pcall(fireproximityprompt, p) then task.wait(0.3) return true end
+        if not VIM then return false end
+        C.key(Enum.KeyCode.E, (p.HoldDuration or 0) + 0.15)
         task.wait(0.3)
         return true
     end
-    local function usePrompt(p, what)
-        local pos = promptPos(p)
-        if not pos then ID.prompts[p] = nil return end
+    function C.usePrompt(p, what)
+        local pos = C.promptPos(p)
+        if not pos then return false end
         F.status = "Walking to " .. what .. " (" .. tostring(p.ObjectText) .. ")"
         local reach = math.max(2, (p.MaxActivationDistance or 10) - 2)
-        if ID.walkTo(pos, reach, 25, function() return not p.Parent end) and p.Parent then
-            ID.press(p)
+        if C.walkTo(pos, reach, 25, function() return not p.Parent end) and p.Parent then
+            C.press(p)
             log(what .. ": " .. tostring(p.ObjectText))
             return true
         end
         return false
     end
 
-    -- guards
-    local function nearestGuard(maxDist)
-        local npcs, r = workspace:FindFirstChild("NPCs"), root()
+    -- mobs: Workspace.NPCs, alive, and no ProximityPrompt (friendly NPCs like Bomi / Robo carry one)
+    function C.isMob(m)
+        if not m:IsA("Model") then return false end
+        local h, hr = m:FindFirstChildOfClass("Humanoid"), m:FindFirstChild("HumanoidRootPart")
+        if not h or not hr or h.Health <= 0 then return false end
+        if m:FindFirstChildWhichIsA("ProximityPrompt", true) then return false end
+        return true
+    end
+    function C.nearestMob(range, accept)
+        local npcs, r = workspace:FindFirstChild("NPCs"), C.root()
         if not npcs or not r then return nil end
-        local best, bestD = nil, maxDist
+        local best, bestD = nil, range
         for _, m in ipairs(npcs:GetChildren()) do
-            if m.Name == "Impel Guard" then
-                local h, hr = m:FindFirstChildOfClass("Humanoid"), m:FindFirstChild("HumanoidRootPart")
-                if h and hr and h.Health > 0 then
-                    local d = (hr.Position - r.Position).Magnitude
-                    if d < bestD then best, bestD = m, d end
-                end
+            if C.isMob(m) and (not accept or accept(m)) then
+                local d = (m.HumanoidRootPart.Position - r.Position).Magnitude
+                if d < bestD then best, bestD = m, d end
             end
         end
         return best, bestD
     end
-    local function holdWeapon()
-        local c = char()
+
+    function C.holdWeapon()
+        local c = LP.Character
         if not c then return nil end
         local t = c:FindFirstChildOfClass("Tool")
         if t then return t end
         local bp = LP:FindFirstChild("Backpack")
-        local pick = bp and (bp:FindFirstChild("Melee"))
-        if pick and hum() then pcall(function() hum():EquipTool(pick) end) task.wait(0.2) end
+        local pick = bp and bp:FindFirstChild("Melee")
+        if pick and C.hum() then pcall(function() C.hum():EquipTool(pick) end) task.wait(0.2) end
         return c:FindFirstChildOfClass("Tool")
     end
+
     local SKILL_KEYS = { Enum.KeyCode.Z, Enum.KeyCode.X, Enum.KeyCode.C }
     local lastSkill, skillN = 0, 0
-    local function fight(m)
+    -- one attack beat on a mob: close in, swing, maybe a skill
+    function C.attack(m, useSkills)
         local hr, h = m:FindFirstChild("HumanoidRootPart"), m:FindFirstChildOfClass("Humanoid")
         if not hr or not h then return end
-        F.status = "Fighting Impel Guard (" .. math.floor(h.Health) .. " hp)"
-        local r = root()
+        F.status = "Fighting " .. m.Name .. " (" .. math.floor(h.Health) .. " hp)"
+        local r = C.root()
         if r and (hr.Position - r.Position).Magnitude > 6 then
-            ID.walkTo(hr.Position, 5, 4, function() return h.Health <= 0 end)
+            C.walkTo(hr.Position, 5, 4, function() return h.Health <= 0 end)
         end
-        local tool = holdWeapon()
+        local tool = C.holdWeapon()
         if tool then pcall(function() tool:Activate() end) end
-        if F.cfg.idSkills and VIM and os.clock() - lastSkill > 4 then
+        if useSkills and os.clock() - lastSkill > 4 then
             lastSkill = os.clock()
             skillN = skillN % #SKILL_KEYS + 1
-            local k = SKILL_KEYS[skillN]
-            pcall(function()
-                VIM:SendKeyEvent(true, k, false, game)
-                task.wait(0.1)
-                VIM:SendKeyEvent(false, k, false, game)
-            end)
+            C.key(SKILL_KEYS[skillN])
         end
         task.wait(0.25)
     end
+end
 
-    -- one decision per tick, most urgent first
+-- Anti AFK (Settings): the usual Idled nudge
+F.conns[#F.conns + 1] = LP.Idled:Connect(function()
+    if not F.cfg.antiAfk then return end
+    pcall(function()
+        local vu = game:GetService("VirtualUser")
+        vu:CaptureController()
+        vu:ClickButton2(Vector2.new())
+    end)
+end)
+
+--------------------------------------------------------------------------------
+-- Impel Down (id_1, 2026-11-19) - only what the recorder has seen in real runs:
+--   cuffs  : char has "Cuffed"; prompt "Use" on "<me>'s Handcuff Key" in Workspace.Effects
+--   chests : prompt "Open" on "Common Chest" / "Rare Chest" in Workspace.Effects
+--   loot   : drops are Models in Workspace.Effects with attribute brItem=true, prompt "Grab"
+--   guards : Workspace.NPCs."Impel Guard" (63 hp, sword + gun, come in groups)
+--   stage  : ReplicatedStorage.matchEvents("waveInfo", text, nil, "ImpelDown") - listened to, never fired
+-- Queue, difficulty vote, maze route, the end of the run and dying are NOT handled (never recorded).
+--------------------------------------------------------------------------------
+do
+    local ID = { PLACE = 11424731604, prompts = {}, stage = "-", done = { chests = 0, loot = 0, keys = 0 } }
+    F.impel = ID
+    local JUNK = { ["Wooden Plank"] = true }
+    function ID.inRaid() return game.PlaceId == ID.PLACE end
+
+    task.spawn(function()
+        local ev = game:GetService("ReplicatedStorage"):WaitForChild("matchEvents", 30)
+        if not ev or not F.alive then return end
+        F.conns[#F.conns + 1] = ev.OnClientEvent:Connect(function(kind, text, _, mode)
+            if kind == "waveInfo" and type(text) == "string" then
+                ID.stage = text
+                log("impel stage: " .. text .. " (" .. tostring(mode) .. ")")
+            end
+        end)
+    end)
+
+    -- prompts in Workspace.Effects kept in a set (no scan every tick)
+    local function addPrompt(p) if p:IsA("ProximityPrompt") then ID.prompts[p] = true end end
+    task.spawn(function()
+        if not ID.inRaid() then return end
+        local fx = workspace:WaitForChild("Effects", 30)
+        if not fx or not F.alive then return end
+        for _, d in ipairs(fx:GetDescendants()) do addPrompt(d) end
+        F.conns[#F.conns + 1] = fx.DescendantAdded:Connect(addPrompt)
+        F.conns[#F.conns + 1] = fx.DescendantRemoving:Connect(function(d) ID.prompts[d] = nil end)
+    end)
+
+    local function kindOf(p)
+        local act, obj = p.ActionText or "", p.ObjectText or ""
+        if act == "Use" and obj == (LP.Name .. "'s Handcuff Key") then return "key" end
+        if act == "Open" and obj:match("Chest$") then return "chest" end
+        if act == "Grab" then
+            local m = p:FindFirstAncestorOfClass("Model")
+            if m and m:GetAttribute("brItem") == true then
+                if F.cfg.idSkipJunk and JUNK[obj] then return nil end
+                return "loot"
+            end
+        end
+        return nil
+    end
+    local function nearestPrompt(want, maxDist)
+        local r = C.root()
+        if not r then return nil end
+        local best, bestD = nil, maxDist
+        for p in pairs(ID.prompts) do
+            if p.Parent and p.Enabled and kindOf(p) == want then
+                local pos = C.promptPos(p)
+                local d = pos and (pos - r.Position).Magnitude
+                if d and d < bestD then best, bestD = p, d end
+            end
+        end
+        return best
+    end
+    local function isGuard(m) return m.Name == "Impel Guard" end
+
     local function step()
-        local c = char()
+        local c = C.char()
         if c and c:FindFirstChild("Cuffed") and F.cfg.idCuffs then
             local p = nearestPrompt("key", 1000)
-            if p then if usePrompt(p, "key") then ID.done.keys = ID.done.keys + 1 end return end
+            if p then if C.usePrompt(p, "key") then ID.done.keys = ID.done.keys + 1 end return end
             F.status = "Cuffed - key not found yet"
             return
         end
         if F.cfg.idFight then
-            local g = nearestGuard(F.cfg.idFightRange)
-            if g then fight(g) return end
+            local g = C.nearestMob(F.cfg.idFightRange, isGuard)
+            if g then C.attack(g, F.cfg.idSkills) return end
         end
         if F.cfg.idLoot then
             local p = nearestPrompt("loot", 120)
-            if p then if usePrompt(p, "loot") then ID.done.loot = ID.done.loot + 1 end return end
+            if p then if C.usePrompt(p, "drop") then ID.done.loot = ID.done.loot + 1 end return end
         end
         if F.cfg.idChests then
             local p = nearestPrompt("chest", 300)
-            if p then if usePrompt(p, "chest") then ID.done.chests = ID.done.chests + 1 end return end
+            if p then if C.usePrompt(p, "chest") then ID.done.chests = ID.done.chests + 1 end return end
         end
         F.status = "Nothing near - walk on by hand (stage: " .. ID.stage .. ")"
     end
@@ -601,12 +637,153 @@ do
             if F.running and F.cfg.mode == "Impel Down" then
                 if not ID.inRaid() then
                     F.status = "Not in Impel Down - queue and pick the difficulty by hand"
-                elseif alive() then
+                elseif C.alive() then
                     local ok, err = pcall(step)
                     if not ok then log("impel error: " .. tostring(err)) end
                 else
                     F.status = "Dead / respawning"
                 end
+            end
+            task.wait(0.2)
+        end
+    end)
+end
+
+--------------------------------------------------------------------------------
+-- open-world parts that need no recorded remote calls (2026-11-19):
+--   mob farm     : fight mobs in Workspace.NPCs by name, walking only; HP retreat; pause near players
+--   daily quests : read ReplicatedStorage.Remotes.DailyQuestsChanged (server -> us, listen only)
+--   fruit alert  : read ReplicatedStorage.Events.fruitspawn / fruitSpawnTime (listen only, raw text first)
+-- Taking / handing in quests, fishing, selling, daily reward claims and stat points need one recorded
+-- hand run each (watch.lua with "My calls (hook)" on) before they can be written.
+--------------------------------------------------------------------------------
+do
+    local W = { kills = 0, daily = nil, dailyAt = nil, fruits = {}, home = nil }
+    F.world = W
+    local RS = game:GetService("ReplicatedStorage")
+
+    local function short(v, n)
+        local s
+        if type(v) == "table" then
+            local ok, j = pcall(function() return HttpService:JSONEncode(v) end)
+            s = ok and j or "{table}"
+        else s = tostring(v) end
+        n = n or 120
+        return #s > n and (s:sub(1, n) .. "...") or s
+    end
+
+    -- listen to a RemoteEvent by path once it exists
+    local function listen(parent, name, fn)
+        task.spawn(function()
+            local ev = parent and parent:WaitForChild(name, 30)
+            if ev and F.alive and ev:IsA("RemoteEvent") then
+                F.conns[#F.conns + 1] = ev.OnClientEvent:Connect(function(...) pcall(fn, ...) end)
+            end
+        end)
+    end
+
+    -- daily quests
+    task.spawn(function()
+        local remotes = RS:WaitForChild("Remotes", 30)
+        listen(remotes, "DailyQuestsChanged", function(data)
+            if type(data) ~= "table" then return end
+            W.daily = data
+            W.dailyAt = os.date("%H:%M")
+        end)
+    end)
+    -- text lines for the Level page; field names inside each quest were never seen, so try the usual ones
+    function W.dailyLines()
+        local d = W.daily
+        if not d then return { "waiting for the game to send them (changes when a quest moves)" } end
+        local cur = type(d.Current) == "table" and d.Current or {}
+        local out = {}
+        local qs = type(cur.Quests) == "table" and cur.Quests or {}
+        for i, q in ipairs(qs) do
+            if type(q) == "table" then
+                local name = q.Name or q.Title or q.Description or q.Id or q.Type
+                local have = q.Progress or q.Current or q.Count
+                local need = q.Goal or q.Required or q.Target or q.Amount
+                if name then
+                    out[#out + 1] = i .. ". " .. tostring(name) .. ((have and need) and ("  " .. tostring(have) .. "/" .. tostring(need)) or "")
+                else
+                    out[#out + 1] = i .. ". " .. short(q, 90)
+                end
+            end
+        end
+        out[#out + 1] = "done " .. tostring(cur.Completed) .. " | claimed " .. tostring(cur.Claimed) .. " | at " .. tostring(W.dailyAt)
+        return out
+    end
+
+    -- fruit alert
+    local function onFruit(tag)
+        return function(...)
+            local line = os.date("%H:%M ") .. tag .. " " .. short({ ... }, 140)
+            table.insert(W.fruits, 1, line)
+            if #W.fruits > 5 then table.remove(W.fruits) end
+            log("fruit: " .. line)
+            if F.cfg.fruitAlert then notify("Fruit news: " .. short({ ... }, 80)) end
+        end
+    end
+    task.spawn(function()
+        local ev = RS:WaitForChild("Events", 30)
+        listen(ev, "fruitspawn", onFruit("spawn"))
+    end)
+    listen(RS, "fruitSpawnTime", onFruit("timer"))
+
+    -- mob farm
+    local function wanted()
+        local list = {}
+        for name in tostring(F.cfg.mobNames or ""):gmatch("[^,]+") do
+            local n = name:match("^%s*(.-)%s*$")
+            if n ~= "" then list[n:lower()] = true end
+        end
+        return list
+    end
+    local function step()
+        local h = C.hum()
+        if not h then return end
+        if F.cfg.stopNearPlayer then
+            local p = C.playerNear(60)
+            if p then F.status = "Paused - player " .. p.Name .. " is near" return end
+        end
+        local r = C.root()
+        if not W.home and r then W.home = r.Position end
+        -- low HP: walk back to where the farm started and wait to heal
+        if C.hpPct() < F.cfg.retreatHp then
+            F.status = "Low HP - backing off to heal"
+            if W.home then C.walkTo(W.home, 6, 15) end
+            while F.alive and F.running and C.alive() and C.hpPct() < 80 do task.wait(1) end
+            return
+        end
+        local names = wanted()
+        local any = next(names) == nil
+        local m = C.nearestMob(F.cfg.mobRange, function(mob) return any or names[mob.Name:lower()] == true end)
+        if not m then
+            F.status = any and "No mob in range" or ("No " .. F.cfg.mobNames .. " in range")
+            if W.home and r and (r.Position - W.home).Magnitude > 20 then C.walkTo(W.home, 6, 15) end
+            return
+        end
+        local mh = m:FindFirstChildOfClass("Humanoid")
+        local t0 = os.clock()
+        while F.alive and F.running and C.alive() and mh and mh.Health > 0 and m.Parent and os.clock() - t0 < 45 do
+            if C.hpPct() < F.cfg.retreatHp then return end
+            C.attack(m, F.cfg.mobSkills)
+        end
+        if mh and mh.Health <= 0 then W.kills = W.kills + 1 log("killed " .. m.Name) end
+    end
+
+    task.spawn(function()
+        while F.alive do
+            if F.running and F.cfg.mode == "Mobs" then
+                if C.alive() then
+                    local ok, err = pcall(step)
+                    if not ok then log("mobs error: " .. tostring(err)) end
+                else
+                    F.status = "Dead / respawning"
+                    W.home = nil
+                end
+            elseif not F.running then
+                W.home = nil
             end
             task.wait(0.2)
         end
@@ -630,10 +807,11 @@ local home = UI.page("Home", 1)
 local run = UI.card(home, 1, "Run")
 UI.toggle(run, "Start / Stop", function() return F.running end, function(v)
     F.running = v
-    F.status = v and (F.cfg.mode == "Impel Down" and "Starting" or ("No farm logic yet (" .. F.cfg.mode .. ")")) or "Idle"
+    local ready = F.cfg.mode == "Impel Down" or F.cfg.mode == "Mobs"
+    F.status = v and (ready and "Starting" or ("No farm logic yet (" .. F.cfg.mode .. ")")) or "Idle"
     log(v and ("start " .. F.cfg.mode) or "stop")
 end)
-UI.choice(run, "Mode", { "Impel Down", "Boss", "Raids", "Fishing", "Level" }, cfgGet("mode"), cfgSet("mode"))
+UI.choice(run, "Mode", { "Impel Down", "Mobs", "Boss", "Raids", "Fishing", "Level" }, cfgGet("mode"), cfgSet("mode"))
 UI.stepper(run, "Stop after (hours)", 1, 12, cfgGet("stopHours"), cfgSet("stopHours"))
 UI.toggle(run, "Stop if kicked / warned", cfgGet("stopOnKick"), cfgSet("stopOnKick"))
 local st = UI.card(home, 2, "Status")
@@ -738,6 +916,21 @@ UI.toggle(fs, "Fight Megalodon if it spawns", cfgGet("fishMegalodon"), cfgSet("f
 
 -- Level
 local level = UI.page("Level", 7)
+local mf = UI.card(level, 1, "Mob farm (works now)")
+UI.input(mf, "Mob names", "blank = any mob, or: Bandit, Marine", cfgGet("mobNames"), cfgSet("mobNames"))
+UI.stepper(mf, "Look within", 20, 300, cfgGet("mobRange"), cfgSet("mobRange"), 20)
+UI.toggle(mf, "Use skills Z / X / C", cfgGet("mobSkills"), cfgSet("mobSkills"))
+UI.info(mf, "Kills", function() return F.world and tostring(F.world.kills) or "0" end)
+UI.note(mf, "Home: Mode Mobs + Start. Stand near the mobs first. Walks only, no quests yet.")
+local dq = UI.card(level, 2, "Daily quests (read only)")
+for i = 1, 4 do
+    UI.info(dq, i == 4 and "Status" or ("Quest " .. i), function()
+        local lines = F.world and F.world.dailyLines() or {}
+        if i == 4 then return lines[#lines] or "-" end
+        if #lines == 1 then return i == 1 and lines[1] or "-" end
+        return (i <= #lines - 1 and lines[i]) or "-"
+    end)
+end
 local lf = UI.card(level, 1, "Level farm")
 UI.stepper(lf, "Target level", 25, 675, cfgGet("lvlTarget"), cfgSet("lvlTarget"), 25)
 UI.toggle(lf, "Auto quest", cfgGet("lvlQuest"), cfgSet("lvlQuest"))
@@ -746,7 +939,6 @@ UI.choice(lf, "Auto stat points", { "Off", "Sword / Defense", "Fruit / Defense",
 local un = UI.card(level, 2, "Unlocks")
 UI.toggle(un, "Train Armament Haki", cfgGet("lvlHaki"), cfgSet("lvlHaki"))
 UI.toggle(un, "Perfect block x200", cfgGet("lvlBlock"), cfgSet("lvlBlock"))
-UI.soon(un, "Daily quests")
 
 -- Settings
 local settings = UI.page("Settings", 8)
@@ -759,6 +951,10 @@ local ex = UI.card(settings, 2, "Extras")
 UI.toggle(ex, "Discord alert on rare drop", cfgGet("discordAlert"), cfgSet("discordAlert"))
 UI.toggle(ex, "Pick up fruits / chests", cfgGet("pickUp"), cfgSet("pickUp"))
 UI.soon(ex, "Redeem codes")
+local fa = UI.card(settings, 1, "Fruit news (read only)")
+UI.toggle(fa, "Pop-up when the game announces a fruit", cfgGet("fruitAlert"), cfgSet("fruitAlert"))
+UI.info(fa, "Last", function() return F.world and F.world.fruits[1] or "nothing yet" end)
+UI.info(fa, "Before", function() return F.world and F.world.fruits[2] or "-" end)
 
 
 -- small toggle button (the window's ... hides it, this brings it back)
