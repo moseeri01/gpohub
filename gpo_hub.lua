@@ -25,7 +25,7 @@ while not LP do task.wait(0.2) LP = Players.LocalPlayer end
 task.wait(0.3)
 if G.__gpo_hub_seq ~= MY_SEQ then return end
 local FOLDER = "gpohub"
-local VERSION = "h_3"
+local VERSION = "h_8"
 
 -- Exact build. GitHub serves the main file from a cache for about 5 minutes, so a hub loaded right after a push
 -- can be an older build. gpohub/want.txt (written at push time on this PC) names the commit to run; a hub that
@@ -1115,6 +1115,21 @@ do
         end)
     end)
 
+    -- own hp every 0.2 s, last 1.2 s kept (Auto block reads it)
+    task.spawn(function()
+        while F.alive do
+            pcall(function()
+                local me = C.hum()
+                if me then
+                    local now = os.clock()
+                    ATK.hpHist = ATK.hpHist or {}
+                    table.insert(ATK.hpHist, { now, me.Health })
+                    while #ATK.hpHist > 1 and now - ATK.hpHist[1][1] > 1.2 do table.remove(ATK.hpHist, 1) end
+                end
+            end)
+            task.wait(0.2)
+        end
+    end)
     -- one attack beat on a mob: close in, face it, swing, maybe a skill
     function C.attack(m, useSkills)
         local hr, h = m:FindFirstChild("HumanoidRootPart"), m:FindFirstChildOfClass("Humanoid")
@@ -1185,6 +1200,39 @@ do
                     log("no swing in 4 s with the last way (" .. what .. ") - now: " .. ATK.names[ATK.method])
                 end
                 ATK.mark = nil
+            end
+        end
+        -- h_4 Auto block (Combat > Defense): the game's block is "hold F" (Backpack Block button sets
+        -- _G.HoldingBlockKey the same way). When own hp fell by 8 % of max or more since the last beat and the
+        -- target is close, hold F 0.8 s instead of swinging. At most once per 2 s.
+        do
+            local me = C.hum()
+            if me then
+                -- h_5: damage over the last 1 s (one beat often holds only part of a hit combo; h_4 never fired)
+                -- h_7: samples come from the 0.2 s loop below (beats are often > 1 s apart, so h_5/h_6 saw one sample = drop 0)
+                local hpNow, now = me.Health, os.clock()
+                ATK.hpHist = ATK.hpHist or {}
+                local top = hpNow
+                for _, e in ipairs(ATK.hpHist) do if e[2] > top then top = e[2] end end
+                local drop = top - hpNow
+                -- h_6 diagnosis: biggest 1 s drop seen, logged every 15 s while fighting
+                ATK.maxDrop = math.max(ATK.maxDrop or 0, drop)
+                if now - (ATK.dropLog or 0) > 15 then
+                    ATK.dropLog = now
+                    log(string.format("block check: biggest hp drop in 1 s = %.0f (%.0f %% of max), close %s, autoBlock %s",
+                        ATK.maxDrop, ATK.maxDrop / me.MaxHealth * 100, tostring(close), tostring(F.cfg.autoBlock)))
+                    ATK.maxDrop = 0
+                end
+                if F.cfg.autoBlock and close and drop >= me.MaxHealth * 0.08 and os.clock() - (ATK.lastBlock or 0) > 2 then
+                    ATK.lastBlock = os.clock()
+                    ATK.blocks = (ATK.blocks or 0) + 1
+                    C.key(Enum.KeyCode.F, 0.8)
+                    if ATK.blocks <= 3 or ATK.blocks % 20 == 0 then
+                        log(string.format("block: held F (hp -%.0f in 1 s), blocks %d", drop, ATK.blocks))
+                    end
+                    ATK.hpHist = {}
+                    return
+                end
             end
         end
         local skillDue = useSkills and close and (ATK.proven or ATK.tries >= #ATK.names) and os.clock() - lastSkill > 1.5
@@ -2065,6 +2113,33 @@ do
             F.running = true
             F.status = "Resumed after teleport"
             log("resume: Start kept on (" .. F.cfg.mode .. ")")
+        end)
+    end)
+    -- h_8 Auto rejoin (Settings): when Roblox shows its error box (lost connection, server shut down, 277 / 279)
+    -- join the same game again; the queued loader brings the hub back and Keep Start resumes the farm.
+    -- A kick / ban / exploit message is NOT rejoined: Start is turned off and the reason is logged.
+    pcall(function()
+        local GS, TS = game:GetService("GuiService"), game:GetService("TeleportService")
+        F.conns[#F.conns + 1] = GS.ErrorMessageChanged:Connect(function(msg)
+            if type(msg) ~= "string" or msg == "" or S.rejoining then return end
+            log("roblox error: " .. msg:sub(1, 160))
+            if msg:lower():find("kick") or msg:lower():find("ban") or msg:lower():find("exploit") then
+                F.running = false
+                saveRun()
+                F.status = "Stopped: kicked (" .. msg:sub(1, 60) .. ")"
+                log("rejoin: not done - looks like a kick / ban")
+                return
+            end
+            if not F.cfg.autoRejoin then return end
+            S.rejoining = true
+            saveRun()
+            task.spawn(function()
+                for i = 1, 5 do
+                    task.wait(5 + i * 5)
+                    log("rejoin: try " .. i)
+                    pcall(function() TS:Teleport(game.PlaceId, LP) end)
+                end
+            end)
         end)
     end)
     task.spawn(function()
@@ -3499,7 +3574,7 @@ local function isIn(tbl) return function(name) return F.cfg[tbl][name] == true e
 -- drawn as a switch any more (it looked like it worked). Each card lists them in one grey line "Not built yet".
 -- List = cfg keys that no logic file reads (grep of src/*.lua on 2026-11-20); remove a key here once it is built.
 local NOT_BUILT = {}
-for k in ("autoBlock autoDodge autoRejoin bossHawk bossHop bossRadiant bossRoger evBaal evSpooks fishBait fishKeepLeg " ..
+for k in ("autoDodge bossHawk bossHop bossRadiant bossRoger evBaal evSpooks fishBait fishKeepLeg " ..
     "fishMegalodon fishSell fishSpot freezeMobs groupMobs idBuy idDiff idKeep idRequeue idSecret idSolo lvlBlock lvlHaki " ..
     "lvlMove normalHits normalSpeed pickUp safeSpot seaMegalodon seaSerpent seaSoulKing stayBehind stopOnKick stunLock"):gmatch("%S+") do
     NOT_BUILT[k] = true
