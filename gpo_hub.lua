@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "m_27"
+local VERSION = "m_28"
 
 -- Every thread the hub starts runs inside pcall. The game's anti-cheat listens to ScriptContext.Error and sends the
 -- text of errors from scripts that are not its own to the server (read in the decompiled "anti" module), so an
@@ -689,7 +689,9 @@ do
         local pos = C.promptPos(p)
         if not pos then return false end
         F.status = "Walking to " .. what .. " (" .. tostring(p.ObjectText) .. ")"
-        local reach = math.max(2, (p.MaxActivationDistance or 10) - 2)
+        -- stand close: 4 studs flat (range 10 minus 2 was measured flat since m_18 and left us too far in 3D -
+        -- m_27: chests "pressed" but none opened, no drops)
+        local reach = math.min(4, math.max(2, (p.MaxActivationDistance or 10) - 2))
         if C.walkTo(pos, reach, 25, function() return not p.Parent end) and p.Parent then
             -- real 3D distance: the walk now measures flat, and a prompt on a ledge above / below is out of the
             -- game's range even when we stand "at" it (20:53: two chests pressed again and again, nothing opened)
@@ -699,8 +701,17 @@ do
                 log(string.format("%s: %s out of reach (%.0f away, mostly height)", what, tostring(p.ObjectText), d3))
                 return false, "far"
             end
+            -- press, then check that the prompt went away / off; if it is still there hold E like a player
+            local function gone() return not p.Parent or not p.Enabled end
+            local how = type(fireproximityprompt) == "function" and "fire" or "hold E"
             C.press(p)
-            log(what .. ": " .. tostring(p.ObjectText))
+            task.wait(0.5)
+            if not gone() and VIM then
+                how = "hold E"
+                C.key(Enum.KeyCode.E, (p.HoldDuration or 0) + 0.25)
+                task.wait(0.5)
+            end
+            log(string.format("%s: %s (%s, %.0f away, %s)", what, tostring(p.ObjectText), how, d3, gone() and "done" or "still there"))
             return true
         end
         return false
