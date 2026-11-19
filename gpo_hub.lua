@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "m_10"
+local VERSION = "m_11"
 
 local F = {
     alive = true,
@@ -1329,7 +1329,7 @@ do
     end
     pcall(function()
         if F.cfg.reloadHub and type(queue_on_teleport) == "function" then
-            queue_on_teleport('loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/gpohub/main/gpo_hub.lua"))()')
+            queue_on_teleport('loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/gpohub/main/gpo_hub.lua?t=" .. tostring(os.time())))()')
         end
     end)
     pcall(function()
@@ -1599,6 +1599,19 @@ UI.stepper(run, "Stop after (hours)", 1, 12, cfgGet("stopHours"), cfgSet("stopHo
 UI.toggle(run, "Stop if kicked / warned", cfgGet("stopOnKick"), cfgSet("stopOnKick"))
 UI.toggle(run, "Keep Start on after a teleport", cfgGet("keepStart"), cfgSet("keepStart"))
 UI.toggle(run, "Reload hub after a teleport", cfgGet("reloadHub"), cfgSet("reloadHub"))
+-- Reload = stop this hub and run the newest one from GitHub (no rejoin needed). The ?t= part skips GitHub's
+-- 5-minute cache. Close = stop and remove the window; the loader brings it back.
+local LOADER = "https://raw.githubusercontent.com/moseeri01/gpohub/main/gpo_hub.lua"
+local function reloadHub()
+    log("reload asked from the window")
+    local ok, src = pcall(function() return game:HttpGet(LOADER .. "?t=" .. tostring(os.time())) end)
+    if not ok or type(src) ~= "string" or #src < 1000 then notify("Reload failed: could not download") return end
+    local fn = loadstring(src)
+    if not fn then notify("Reload failed: the download does not run") return end
+    task.spawn(fn)   -- the new hub stops this one first (G.__gpo_hub_stop)
+end
+UI.button(run, "Reload hub (newest version)", "Reload", reloadHub)
+UI.button(run, "Close hub", "Close", function() if G.__gpo_hub_stop then G.__gpo_hub_stop() end end)
 local st = UI.card(home, 2, "Status")
 UI.info(st, "Now", function() return F.status end)
 UI.info(st, "Mode", function() return F.cfg.mode end)
@@ -1804,6 +1817,8 @@ end)
 
 G.__gpo_hub_stop = function()
     F.alive = false
+    F.running = false
+    pcall(function() F.core.sprint(false) end)
     for _, c in ipairs(F.conns) do pcall(function() c:Disconnect() end) end
     pcall(function() gui:Destroy() end)
 end
