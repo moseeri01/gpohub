@@ -25,7 +25,7 @@ while not LP do task.wait(0.2) LP = Players.LocalPlayer end
 task.wait(0.3)
 if G.__gpo_hub_seq ~= MY_SEQ then return end
 local FOLDER = "gpohub"
-local VERSION = "h_11"
+local VERSION = "h_12"
 
 -- Exact build. GitHub serves the main file from a cache for about 5 minutes, so a hub loaded right after a push
 -- can be an older build. gpohub/want.txt (written at push time on this PC) names the commit to run; a hub that
@@ -1223,7 +1223,7 @@ do
                         ATK.maxDrop, ATK.maxDrop / me.MaxHealth * 100, tostring(close), tostring(F.cfg.autoBlock)))
                     ATK.maxDrop = 0
                 end
-                if F.cfg.autoBlock and close and drop >= me.MaxHealth * 0.08 and os.clock() - (ATK.lastBlock or 0) > 2 then
+                if F.cfg.autoBlock and close and drop >= me.MaxHealth * 0.06 and os.clock() - (ATK.lastBlock or 0) > 2 then
                     ATK.lastBlock = os.clock()
                     ATK.blocks = (ATK.blocks or 0) + 1
                     C.key(Enum.KeyCode.F, 0.8)
