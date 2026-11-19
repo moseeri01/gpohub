@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "m_3"
+local VERSION = "m_4"
 
 local F = {
     alive = true,
@@ -417,9 +417,21 @@ do
         near = near or 4
         local t0 = os.clock()
         local points = { pos }
+        local pathState = "no path call"
+        -- why a walk failed goes to the log (at most one line every 3 s)
+        local function fail(why)
+            if os.clock() - (C.failAt or 0) > 3 then
+                C.failAt = os.clock()
+                local rr = C.root()
+                log(string.format("walk failed: %s (path %s, %.0f left, speed %s)", why, pathState,
+                    rr and (rr.Position - pos).Magnitude or -1, tostring(h.WalkSpeed)))
+            end
+            return false
+        end
         pcall(function()
             local path = PFS:CreatePath({ AgentRadius = 2.5, AgentHeight = 5, AgentCanJump = true, WaypointSpacing = 6 })
             path:ComputeAsync(r.Position, pos)
+            pathState = tostring(path.Status):gsub("Enum.PathStatus.", "")
             if path.Status == Enum.PathStatus.Success then
                 points = {}
                 for _, w in ipairs(path:GetWaypoints()) do points[#points + 1] = w end
@@ -434,14 +446,14 @@ do
                 if not r then return false end
                 if (r.Position - pos).Magnitude <= near then return true end
                 if (r.Position - target).Magnitude <= 3 then break end
-                if os.clock() - t0 > (limit or 20) then return false end
+                if os.clock() - t0 > (limit or 20) then return fail("timeout") end
                 if stop and stop() then return false end
                 h:MoveTo(target)
                 task.wait(0.25)
                 if (r.Position - lastPos).Magnitude < 0.5 then
                     stuck = stuck + 1
                     if stuck == 6 then h.Jump = true end
-                    if stuck >= 12 then return false end
+                    if stuck >= 12 then return fail("not moving for 3 s") end
                 else stuck = 0 end
                 lastPos = r.Position
             end
@@ -678,6 +690,8 @@ do
         return best
     end
     -- other enemies recorded in the raid: Blugori, Kelvin, Santa, Kramprus, Snow Wolf (bosses / event) - only with the switch
+    ID.KEYSPOT = Vector3.new(3026.3, 2075.9, -13411.0)
+    function ID.count() local n = 0 for _ in pairs(ID.prompts) do n = n + 1 end return n end
     local function isGuard(m) return F.cfg.idBosses or m.Name == "Impel Guard" end
 
     -- maze (m_1). Floor 1 maze = a 75-stud grid: in the recorded run chests and corridor centre lines sit on
@@ -791,7 +805,17 @@ do
         if c and c:FindFirstChild("Cuffed") and F.cfg.idCuffs then
             local p = nearestPrompt("key", 1000)
             if p then if C.usePrompt(p, "key") then ID.done.keys = ID.done.keys + 1 end return end
-            F.status = "Cuffed - key not found yet"
+            -- the key is not loaded yet (the game streams in nearby things only): go where it lay in the recorded
+            -- run (3026,2076,-13411); if it is not there either, say so and wait for the owner
+            local r = C.root()
+            if r and not ID.keySpotTried and (r.Position - ID.KEYSPOT).Magnitude < 800 then
+                F.status = "Cuffed - key not loaded, walking to the recorded key spot"
+                C.walkTo(ID.KEYSPOT, 6, 40, function() return nearestPrompt("key", 1000) ~= nil end)
+                r = C.root()
+                if r and (r.Position - ID.KEYSPOT).Magnitude < 12 then ID.keySpotTried = true end
+                return
+            end
+            F.status = "Cuffed - key not found (prompts known: " .. ID.count() .. ")"
             return
         end
         -- low HP: stop walking into fights (loot and chests go on); no safe spot is known yet, so it does not run away
@@ -940,6 +964,21 @@ do
             if plain:find("BOSS DEFEATED", 1, true) then S.bosses = S.bosses + 1 end
             if plain:find("CLEARED", 1, true) then S.areas = S.areas + 1 end
         end)
+    end)
+
+    -- every new status line goes to the log (numbers ignored when comparing), so a run can be read afterwards
+    task.spawn(function()
+        local last = ""
+        while F.alive do
+            local s = tostring(F.status)
+            local shape = s:gsub("%-?%d+%.?%d*", "#")
+            if F.running and shape ~= last then
+                last = shape
+                local r = C.root()
+                log("status: " .. s .. (r and string.format("  @ %.0f,%.0f,%.0f", r.Position.X, r.Position.Y, r.Position.Z) or ""))
+            end
+            task.wait(0.5)
+        end
     end)
 
     -- account values: the game keeps them in ReplicatedStorage["Stats" .. name] (seen in scans and in the game's
