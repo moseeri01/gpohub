@@ -25,7 +25,7 @@ while not LP do task.wait(0.2) LP = Players.LocalPlayer end
 task.wait(0.3)
 if G.__gpo_hub_seq ~= MY_SEQ then return end
 local FOLDER = "gpohub"
-local VERSION = "h_8"
+local VERSION = "h_10"
 
 -- Exact build. GitHub serves the main file from a cache for about 5 minutes, so a hub loaded right after a push
 -- can be an older build. gpohub/want.txt (written at push time on this PC) names the commit to run; a hub that
@@ -89,7 +89,7 @@ local F = {
         -- Fishing
         fishSpot = "Rough Waters", fishBait = true, fishSell = true, fishKeepLeg = true, fishMegalodon = false,
         -- Level
-        lvlTarget = 675, lvlQuest = true, lvlMove = true, lvlStats = "Sword / Defense", autoStats = false, lvlHaki = false, lvlBlock = false, hover = false, hoverHeight = 5,
+        lvlTarget = 675, lvlQuest = true, lvlMove = true, lvlStats = "Sword / Defense", autoStats = false, lvlHaki = false, lvlBlock = false, hover = false, hoverHeight = 5, lvlKeep = true,
         -- Settings
         normalSpeed = true, sprint = true, keyWalk = true, geppo = true, stopNearPlayer = true, antiAfk = true, autoRejoin = false,
         discordAlert = false, pickUp = false, webhook = "", bossAlert = true, bossRange = 300, bossSkills = false,
@@ -2534,7 +2534,12 @@ do
         end
         local level = tonumber(F.session.stat("Level")) or 0
         if level <= 0 then F.status = "Level: account data not loaded yet" return end
-        if level >= F.cfg.lvlTarget then
+        -- h_9: at the target (675 = max) keep taking quests for Peli and drops when "Keep questing" is on
+        if level >= F.cfg.lvlTarget and F.cfg.lvlKeep and not L.keepLogged then
+            L.keepLogged = true
+            log("level: target " .. F.cfg.lvlTarget .. " reached - keep questing for Peli / drops (Level > Keep questing)")
+        end
+        if level >= F.cfg.lvlTarget and not F.cfg.lvlKeep then
             F.status = "Level " .. level .. " reached the target " .. F.cfg.lvlTarget
             F.running = false
             log("level: target reached")
@@ -2576,6 +2581,21 @@ do
                 end
                 s = { f = 0, t = 9999, q = best.q, n = best.n, m = best.m, b = "", a = best.a, y = "Defeat" }
                 L.step = s
+            elseif not s then
+                -- h_10: no route step (level 675 = past the route) and no quest mob loaded yet (just respawned at the
+                -- dock): walk to the nearest quest NPC with amount > 1 on this island; its mobs load near it
+                local nb, nd = nil, 3000
+                for _, o in ipairs(LOCALQ) do
+                    local p = npcPos(o.n)
+                    if p and o.a > 1 and not L.skipQ[o.q] then
+                        local d = (p - r.Position).Magnitude
+                        if d < nd then nb, nd = o, d end
+                    end
+                end
+                if nb then
+                    s = { f = 0, t = 9999, q = nb.q, n = nb.n, m = nb.m, b = "", a = nb.a, y = "Defeat" }
+                    L.step = s
+                end
             end
         end
         if not s then F.status = "Level: no route step for level " .. level return end
@@ -3779,6 +3799,7 @@ UI.note(lq, "Home: Mode Level + Start. Walks only: be on the island of the step'
 local lf = UI.card(level, 1, "Level farm")
 UI.stepper(lf, "Target level", 25, 675, cfgGet("lvlTarget"), cfgSet("lvlTarget"), 25)
 UI.toggle(lf, "Auto quest", cfgGet("lvlQuest"), cfgSet("lvlQuest"))
+UI.toggle(lf, "Keep questing at the target (Peli / drops)", cfgGet("lvlKeep"), cfgSet("lvlKeep"))
 UI.toggle(lf, "Move island by level", cfgGet("lvlMove"), cfgSet("lvlMove"))
 UI.toggle(lf, risk("Spend skill points (works now)", "low"), cfgGet("autoStats"), cfgSet("autoStats"))
 UI.choice(lf, "Split points", { "Sword / Defense", "Fruit / Defense", "Sword / Fruit" }, cfgGet("lvlStats"), cfgSet("lvlStats"))
