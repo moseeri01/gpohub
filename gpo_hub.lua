@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "m_17"
+local VERSION = "m_18"
 
 -- Every thread the hub starts runs inside pcall. The game's anti-cheat listens to ScriptContext.Error and sends the
 -- text of errors from scripts that are not its own to the server (read in the decompiled "anti" module), so an
@@ -506,15 +506,21 @@ do
                 for _, w in ipairs(path:GetWaypoints()) do points[#points + 1] = w end
             end
         end)
-        for _, w in ipairs(points) do
+        -- Path waypoints lie on the ground, the root part about 3 studs above it. Measured in 3D the first waypoint
+        -- (our own feet) was never "reached" and the walk stood still (remote test 20:30: WalkToPoint = own position).
+        -- So: arrival is measured flat (X / Z), and the first waypoint of a real path is skipped.
+        local function flat(a, b) return Vector3.new(a.X - b.X, 0, a.Z - b.Z).Magnitude end
+        for i, w in ipairs(points) do
             local target = typeof(w) == "Vector3" and w or w.Position
+            if i == 1 and #points > 1 then target = nil end
+            if target then
             if typeof(w) ~= "Vector3" and w.Action == Enum.PathWaypointAction.Jump then h.Jump = true end
             local lastPos, stuck = r.Position, 0
             while F.alive and F.running and C.alive() do
                 r = C.root()
                 if not r then return false end
-                if (r.Position - pos).Magnitude <= near then return true end
-                if (r.Position - target).Magnitude <= 3 then break end
+                if flat(r.Position, pos) <= near and math.abs(r.Position.Y - pos.Y) < 12 then return true end
+                if flat(r.Position, target) <= 3 then break end
                 if os.clock() - t0 > (limit or 20) then return fail("timeout") end
                 if stop and stop() then return false end
                 h:MoveTo(target)
@@ -527,9 +533,10 @@ do
                 else stuck = 0 end
                 lastPos = r.Position
             end
+            end
         end
         r = C.root()
-        return r ~= nil and (r.Position - pos).Magnitude <= near + 2
+        return r ~= nil and flat(r.Position, pos) <= near + 2
     end
 
     -- jump the way a player does: the game's Movements script owns jumping (it switches JumpPower between 0 and
@@ -1677,6 +1684,7 @@ do
         elseif cmd == "stop" then
             F.running = false
             R.goal = nil
+            if F.cfg.mode == "Goto" then F.cfg.mode = R.prevMode or "Impel Down" end
             F.status = "Idle"
             log("remote: stop")
         elseif cmd == "cancel" then
@@ -1692,6 +1700,7 @@ do
             local x, y, z = rest:match("^(-?[%d%.]+)[%s,]+(-?[%d%.]+)[%s,]+(-?[%d%.]+)$")
             if x then
                 R.goal = Vector3.new(tonumber(x), tonumber(y), tonumber(z))
+                if F.cfg.mode ~= "Goto" then R.prevMode = F.cfg.mode end
                 F.cfg.mode = "Goto"
                 F.running = true
                 log("remote: goto " .. rest)
@@ -1797,6 +1806,7 @@ do
                     log(string.format("remote: goto reached (%.0f away)", d))
                     R.goal = nil
                     F.running = false
+                    F.cfg.mode = R.prevMode or "Impel Down"
                     F.status = "Goto done"
                 else
                     F.status = "Goto (" .. math.floor(d) .. " left)"
