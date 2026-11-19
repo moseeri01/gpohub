@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "s_1"
+local VERSION = "s_2"
 
 local F = {
     alive = true,
@@ -20,7 +20,7 @@ local F = {
     lastAction = "",
     cfg = {
         -- Home
-        mode = "Impel Down", stopHours = 3, stopOnKick = true,
+        mode = "Impel Down", stopHours = 3, stopOnKick = true, keepStart = true, reloadHub = true,
         -- Combat
         preset = "Safe", useSword = true, useFruit = true, useGun = false, useStyle = true,
         normalHits = true, groupMobs = true, stunLock = true, useHaki = true,
@@ -42,7 +42,7 @@ local F = {
         lvlTarget = 325, lvlQuest = true, lvlMove = true, lvlStats = "Sword / Defense", lvlHaki = false, lvlBlock = false,
         -- Settings
         normalSpeed = true, stopNearPlayer = true, antiAfk = true, autoRejoin = false,
-        discordAlert = false, pickUp = false,
+        discordAlert = false, pickUp = false, webhook = "", bossAlert = true, bossRange = 300, bossSkills = false,
     },
 }
 
@@ -688,7 +688,10 @@ do
             F.status = "Cuffed - key not found yet"
             return
         end
-        if F.cfg.idFight then
+        -- low HP: stop walking into fights (loot and chests go on); no safe spot is known yet, so it does not run away
+        local low = C.hpPct() < F.cfg.retreatHp
+        if low then F.status = "Low HP - not fighting (Combat: Retreat below HP)" end
+        if F.cfg.idFight and not low then
             local g = C.nearestMob(F.cfg.idFightRange, isGuard)
             if g then C.attack(g, F.cfg.idSkills) return end
         end
@@ -728,7 +731,7 @@ end
 -- Counters for today are kept in gpohub/session.json because the hub reloads on every teleport.
 --------------------------------------------------------------------------------
 do
-    local S = { drops = {}, rare = {}, raids = 0, day = os.date("%Y-%m-%d"), floor = "-", bosses = 0, areas = 0, raidT = nil, startT = nil, lastJob = nil }
+    local S = { drops = {}, rare = {}, raids = 0, day = os.date("%Y-%m-%d"), floor = "-", bosses = 0, areas = 0, raidT = nil, since = nil, lastJob = nil, bossSeen = "-" }
     F.session = S
     local RS = game:GetService("ReplicatedStorage")
     local FILE = FOLDER .. "/session.json"
@@ -801,7 +804,7 @@ do
         local evs = RS:WaitForChild("Events", 30)
         local note = evs and evs:WaitForChild("note", 30)
         if note and F.alive and note:IsA("RemoteEvent") then
-            F.conns[#F.conns + 1] = note.OnClientEvent:Connect(function(text) pcall(onNote, text) end)
+            F.conns[#F.conns + 1] = note.OnClientEvent:Connect(function(text) pcall(S.onNote, text) end)
         end
     end)
     task.spawn(function()
@@ -817,17 +820,67 @@ do
         end)
     end)
 
+    -- Discord alert (Settings): Epic and better drops go to the owner's own webhook. The URL is typed into the hub
+    -- and lives only in gpohub/config.json; it is never logged.
+    local ALERT = { Epic = true, Legendary = true, Mythical = true }
+    function S.alert(text)
+        local url = tostring(F.cfg.webhook or "")
+        if not F.cfg.discordAlert or not url:match("^https://discord") then return end
+        local req = request or http_request
+        if type(req) ~= "function" then return end
+        task.spawn(function()
+            pcall(req, { Url = url, Method = "POST", Headers = { ["Content-Type"] = "application/json" },
+                Body = HttpService:JSONEncode({ content = "[gpo] " .. LP.Name .. ": " .. text }) })
+        end)
+    end
+    S.onNote = function(text)
+        onNote(text)
+        if type(text) ~= "string" then return end
+        local rar, name = text:match("New Item <Rare=(%a+)><(.+)>")
+        if rar and ALERT[rar] then S.alert(name .. " (" .. rar .. ")") end
+    end
+
+    -- Start survives a teleport (Home: Keep Start on): gpohub/run.json holds when Start was pressed; the hub is
+    -- queued again with queue_on_teleport, and the "Stop after" clock keeps counting from the first press.
+    local RUN = FOLDER .. "/run.json"
+    local function saveRun()
+        if not canFiles then return end
+        ensureFolder()
+        pcall(function() writefile(RUN, HttpService:JSONEncode({ running = F.running, since = S.since })) end)
+    end
+    pcall(function()
+        if F.cfg.reloadHub and type(queue_on_teleport) == "function" then
+            queue_on_teleport('loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/gpohub/main/gpo_hub.lua"))()')
+        end
+    end)
+    pcall(function()
+        if not (F.cfg.keepStart and canFiles and isfile(RUN)) then return end
+        local d = HttpService:JSONDecode(readfile(RUN))
+        if type(d) ~= "table" or d.running ~= true or type(d.since) ~= "number" then return end
+        if os.time() - d.since >= F.cfg.stopHours * 3600 then return end
+        task.delay(8, function()
+            if not F.alive or F.running then return end
+            S.since = d.since
+            F.running = true
+            F.status = "Resumed after teleport"
+            log("resume: Start kept on (" .. F.cfg.mode .. ")")
+        end)
+    end)
     task.spawn(function()
+        task.wait(10)   -- after the resume check above
         while F.alive do
             if F.running then
-                S.startT = S.startT or os.clock()
-                if os.clock() - S.startT > F.cfg.stopHours * 3600 then
+                if not S.since then S.since = os.time() saveRun() end
+                if os.time() - S.since > F.cfg.stopHours * 3600 then
                     F.running = false
+                    S.since = nil
+                    saveRun()
                     F.status = "Stopped: ran " .. F.cfg.stopHours .. " h (Home: Stop after)"
                     log("stop: time limit")
                 end
-            else
-                S.startT = nil
+            elseif S.since then
+                S.since = nil
+                saveRun()
             end
             task.wait(2)
         end
@@ -975,6 +1028,71 @@ do
         end
     end)
 end
+--------------------------------------------------------------------------------
+-- world bosses (b_1, 2026-11-19): only what needs no recorded call.
+--   alert : a ticked boss shows up in Workspace.NPCs (the game streams in nearby NPCs only, so this fires when
+--           the boss is loaded near you, not server-wide)
+--   fight : Home Mode "Boss" walks to a ticked boss within Boss "Look within" and fights it with the shared core
+-- Pill labels are matched as lower-case text inside the NPC name ("Ghost Prin." -> "ghost prin"); the real NPC
+-- names were never recorded, so a label that never matches needs its name from a scan.
+-- Timers, spawn spots, summon chains, sea bosses and server hop are NOT here (no data).
+--------------------------------------------------------------------------------
+do
+    local B = { seen = {} }
+    F.boss = B
+    local function ticked(name)
+        local low = name:lower()
+        for label, on in pairs(F.cfg.bossList) do
+            if on then
+                local key = tostring(label):lower():gsub("%.", "")
+                if low:find(key, 1, true) then return true end
+            end
+        end
+        return false
+    end
+    local function check(m)
+        if not F.cfg.bossAlert or B.seen[m] or not m:IsA("Model") or not ticked(m.Name) then return end
+        B.seen[m] = true
+        F.session.bossSeen = os.date("%H:%M ") .. m.Name
+        notify("Boss here: " .. m.Name)
+        F.session.alert("boss here: " .. m.Name)
+    end
+    task.spawn(function()
+        local npcs = workspace:WaitForChild("NPCs", 30)
+        if not npcs or not F.alive then return end
+        for _, m in ipairs(npcs:GetChildren()) do pcall(check, m) end
+        F.conns[#F.conns + 1] = npcs.ChildAdded:Connect(function(m) task.wait(0.5) pcall(check, m) end)
+        F.conns[#F.conns + 1] = npcs.ChildRemoved:Connect(function(m) B.seen[m] = nil end)
+    end)
+
+    local function step()
+        if F.cfg.stopNearPlayer then
+            local p = C.playerNear(60)
+            if p then F.status = "Paused - player " .. p.Name .. " is near" return end
+        end
+        if C.hpPct() < F.cfg.retreatHp then
+            F.status = "Low HP - not fighting (Combat: Retreat below HP)"
+            return
+        end
+        local m = C.nearestMob(F.cfg.bossRange, function(mob) return ticked(mob.Name) end)
+        if not m then F.status = "No ticked boss within " .. F.cfg.bossRange return end
+        C.attack(m, F.cfg.bossSkills)
+    end
+    task.spawn(function()
+        while F.alive do
+            if F.running and F.cfg.mode == "Boss" then
+                if C.alive() then
+                    local ok, err = pcall(step)
+                    if not ok then log("boss error: " .. tostring(err)) end
+                else
+                    F.status = "Dead / respawning"
+                end
+            end
+            task.wait(0.2)
+        end
+    end)
+end
+
 
 --------------------------------------------------------------------------------
 -- pages (settings only - the farm logic is added per mode later)
@@ -993,13 +1111,15 @@ local home = UI.page("Home", 1)
 local run = UI.card(home, 1, "Run")
 UI.toggle(run, "Start / Stop", function() return F.running end, function(v)
     F.running = v
-    local ready = F.cfg.mode == "Impel Down" or F.cfg.mode == "Mobs"
+    local ready = F.cfg.mode == "Impel Down" or F.cfg.mode == "Mobs" or F.cfg.mode == "Boss"
     F.status = v and (ready and "Starting" or ("No farm logic yet (" .. F.cfg.mode .. ")")) or "Idle"
     log(v and ("start " .. F.cfg.mode) or "stop")
 end)
 UI.choice(run, "Mode", { "Impel Down", "Mobs", "Boss", "Raids", "Fishing", "Level" }, cfgGet("mode"), cfgSet("mode"))
 UI.stepper(run, "Stop after (hours)", 1, 12, cfgGet("stopHours"), cfgSet("stopHours"))
 UI.toggle(run, "Stop if kicked / warned", cfgGet("stopOnKick"), cfgSet("stopOnKick"))
+UI.toggle(run, "Keep Start on after a teleport", cfgGet("keepStart"), cfgSet("keepStart"))
+UI.toggle(run, "Reload hub after a teleport", cfgGet("reloadHub"), cfgSet("reloadHub"))
 local st = UI.card(home, 2, "Status")
 UI.info(st, "Now", function() return F.status end)
 UI.info(st, "Mode", function() return F.cfg.mode end)
@@ -1074,6 +1194,11 @@ UI.note(fl, "1 maze - 2 Sphinx - 3 Jailer Han - 4 Blugori - 5 Vera")
 local boss = UI.page("Boss", 4)
 local wb = UI.card(boss, 1, "World bosses (respawn)")
 UI.pills(wb, { "Juzo", "Ryuma", "Borj", "Ghost Prin.", "Crab King", "Zeke", "Gravito" }, isIn("bossList"), setIn("bossList"))
+UI.toggle(wb, "Alert when a ticked boss is near", cfgGet("bossAlert"), cfgSet("bossAlert"))
+UI.stepper(wb, "Look within", 50, 600, cfgGet("bossRange"), cfgSet("bossRange"), 50)
+UI.toggle(wb, "Use skills Z / X / C", cfgGet("bossSkills"), cfgSet("bossSkills"))
+UI.info(wb, "Last seen", function() return F.session.bossSeen end)
+UI.note(wb, "Home: Mode Boss + Start walks to a ticked boss and fights. Sees only bosses loaded near you.")
 UI.toggle(wb, risk("Server hop to find boss", "mid"), cfgGet("bossHop"), cfgSet("bossHop"))
 local sc = UI.card(boss, 1, "Summon chains")
 UI.soon(sc, "Moria / Donmingo / Zhen / Musashi")
@@ -1149,7 +1274,11 @@ UI.toggle(sf, "Stop when a player is near", cfgGet("stopNearPlayer"), cfgSet("st
 UI.toggle(sf, "Anti AFK", cfgGet("antiAfk"), cfgSet("antiAfk"))
 UI.toggle(sf, "Auto rejoin", cfgGet("autoRejoin"), cfgSet("autoRejoin"))
 local ex = UI.card(settings, 2, "Extras")
-UI.toggle(ex, "Discord alert on rare drop", cfgGet("discordAlert"), cfgSet("discordAlert"))
+UI.toggle(ex, "Discord alert: Epic+ drop / boss", cfgGet("discordAlert"), cfgSet("discordAlert"))
+UI.input(ex, "Webhook", "paste your Discord webhook URL", function() return F.cfg.webhook ~= "" and "(saved)" or "" end, function(v)
+    if type(v) == "string" and v:match("^https://discord") then F.cfg.webhook = v saveAll() end
+end)
+UI.button(ex, "Test alert", "Send", function() F.session.alert("test from the hub") end)
 UI.toggle(ex, "Pick up fruits / chests", cfgGet("pickUp"), cfgSet("pickUp"))
 UI.soon(ex, "Redeem codes")
 local fa = UI.card(settings, 1, "Fruit news (read only)")
