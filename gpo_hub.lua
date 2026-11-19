@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "m_6"
+local VERSION = "m_7"
 
 local F = {
     alive = true,
@@ -1028,28 +1028,51 @@ do
         end
     end)
 
-    -- one-time probe (m_6): the game's own input scripts sit in the Backpack and were not in the Watch dump.
-    -- Sprint (double W), dash (Q) and M1 are handled there; reading them replaces guessing. Written once per
-    -- script to gpohub/src/<name>_<place>.lua. Only reads (decompile), sends nothing.
+    -- one-time probe (m_7): the Watch dump covers ReplicatedStorage / ReplicatedFirst only. The scripts that take
+    -- the player s input (Backpack: Movements, MeleeScript, ImpelClient ...) and the game s own windows
+    -- (PlayerGui: Matchmake, ImpelDownUI ...; PlayerScripts) live under the player. Read them once per place into
+    -- gpohub/src/<placeId>/ with an index. Only reads (decompile), sends nothing.
     task.delay(12, function()
         if not F.alive or type(decompile) ~= "function" or not canFiles then return end
-        local bp = LP:FindFirstChild("Backpack")
-        if not bp then return end
-        pcall(function() if type(makefolder) == "function" and not isfolder(FOLDER .. "/src") then makefolder(FOLDER .. "/src") end end)
-        for _, name in ipairs({ "Movements", "MeleeScript", "MovementPhysics", "ImpelClient", "InputCallbacks", "Glide" }) do
-            local sc = bp:FindFirstChild(name)
-            local file = FOLDER .. "/src/" .. name .. "_" .. tostring(game.PlaceId) .. ".lua"
-            if sc and sc:IsA("LuaSourceContainer") and not isfile(file) then
-                local ok, src = pcall(decompile, sc)
-                if ok and type(src) == "string" and #src > 0 then
-                    pcall(writefile, file, "-- " .. sc:GetFullName() .. "\n" .. src)
-                    log("probe: saved " .. name .. " (" .. #src .. " chars)")
-                else
-                    log("probe: could not read " .. name)
+        local dir = FOLDER .. "/src/" .. tostring(game.PlaceId)
+        if isfile(dir .. "/_index.txt") then return end
+        pcall(function()
+            if type(makefolder) == "function" then
+                if not isfolder(FOLDER .. "/src") then makefolder(FOLDER .. "/src") end
+                if not isfolder(dir) then makefolder(dir) end
+            end
+        end)
+        local list, seen = {}, {}
+        for _, rootName in ipairs({ "Backpack", "PlayerScripts", "PlayerGui" }) do
+            local root = LP:FindFirstChild(rootName)
+            if root then
+                for _, d in ipairs(root:GetDescendants()) do
+                    if (d:IsA("LocalScript") or d:IsA("ModuleScript")) and not seen[d] and not d:FindFirstAncestor("MoseeriGPO") then
+                        seen[d] = true
+                        list[#list + 1] = d
+                    end
                 end
-                task.wait(0.5)
             end
         end
+        local index, ok_n = { "# " .. #list .. " scripts under the player | PlaceId " .. tostring(game.PlaceId) .. " | " .. os.date("%Y-%m-%d %H:%M:%S") }, 0
+        for i, sc in ipairs(list) do
+            if not F.alive or i > 500 then break end
+            local okd, src = pcall(decompile, sc)
+            local name = string.format("%04d_%s.lua", i, sc.Name:gsub("[^%w%-]", "_"):sub(1, 40))
+            if okd and type(src) == "string" and #src > 0 then
+                pcall(writefile, dir .. "/" .. name, "-- " .. sc:GetFullName() .. "
+" .. src)
+                ok_n = ok_n + 1
+                index[#index + 1] = name .. " | " .. #src .. " bytes | " .. sc.ClassName .. " " .. sc:GetFullName()
+            else
+                index[#index + 1] = name .. " | FAILED | " .. sc.ClassName .. " " .. sc:GetFullName()
+            end
+            if i % 5 == 0 then task.wait() end
+        end
+        pcall(writefile, dir .. "/_index.txt", table.concat(index, "
+") .. "
+")
+        log("probe: read " .. ok_n .. " of " .. #list .. " player scripts into " .. dir)
     end)
 
     -- account values: the game keeps them in ReplicatedStorage["Stats" .. name] (seen in scans and in the game's
