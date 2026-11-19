@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "m_19"
+local VERSION = "m_20"
 
 -- Every thread the hub starts runs inside pcall. The game's anti-cheat listens to ScriptContext.Error and sends the
 -- text of errors from scripts that are not its own to the server (read in the decompiled "anti" module), so an
@@ -526,10 +526,10 @@ do
                 h:MoveTo(target)
                 if C.wantSprint then C.sprint(true) end
                 task.wait(0.25)
-                if (r.Position - lastPos).Magnitude < 0.5 then
+                if Vector3.new(r.Position.X - lastPos.X, 0, r.Position.Z - lastPos.Z).Magnitude < 0.5 then
                     stuck = stuck + 1
-                    if stuck >= 7 then C.overObstacle() elseif stuck >= 3 then C.jump() end
-                    if stuck >= 12 then return fail("not moving for 3 s") end
+                    if stuck >= 4 and stuck % 4 == 0 then C.sidestep(target) elseif stuck >= 7 then C.overObstacle() elseif stuck >= 3 then C.jump() end
+                    if stuck >= 28 then return fail("not moving for 7 s") end
                 else stuck = 0 end
                 lastPos = r.Position
             end
@@ -612,7 +612,7 @@ do
             h:MoveTo(pos)
             if C.wantSprint then C.sprint(true) end
             task.wait(0.2)
-            if lastPos and (r.Position - lastPos).Magnitude < 0.4 then
+            if lastPos and Vector3.new(r.Position.X - lastPos.X, 0, r.Position.Z - lastPos.Z).Magnitude < 0.4 then
                 stuck = stuck + 1
                 if stuck >= 4 and stuck % 4 == 0 then C.sidestep(pos) elseif stuck >= 6 then C.overObstacle() elseif stuck >= 2 then C.jump() end
                 if stuck >= 40 then return false end
