@@ -25,7 +25,7 @@ while not LP do task.wait(0.2) LP = Players.LocalPlayer end
 task.wait(0.3)
 if G.__gpo_hub_seq ~= MY_SEQ then return end
 local FOLDER = "gpohub"
-local VERSION = "k_1"
+local VERSION = "k_2"
 
 -- Exact build. GitHub serves the main file from a cache for about 5 minutes, so a hub loaded right after a push
 -- can be an older build. gpohub/want.txt (written at push time on this PC) names the commit to run; a hub that
@@ -1457,7 +1457,13 @@ do
         if ID.backing then
             local r = C.root()
             local g = C.nearestMob(120, function() return true end)
-            if r and g then
+            -- before the maze: run back up the known route to the start room (23:15: walking "away" led into the maze
+            -- and pulled 16 guards); the run is faster than the guards
+            local preMaze = not ID.inMaze() and (ID.stage:find("GEAR UP", 1, true) ~= nil or ID.stage == "-")
+            if r and g and preMaze and (r.Position - ID.WAVE1[1]).Magnitude > 25 then
+                F.status = string.format("Low HP (%.0f %%) - running back to the start room", C.hpPct())
+                C.walkTo(ID.WAVE1[1], 10, 25)
+            elseif r and g then
                 local away = r.Position - g.HumanoidRootPart.Position
                 away = Vector3.new(away.X, 0, away.Z)
                 if away.Magnitude < 1 then away = Vector3.new(0, 0, 1) end
