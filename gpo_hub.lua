@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "m_22"
+local VERSION = "m_23"
 
 -- Every thread the hub starts runs inside pcall. The game's anti-cheat listens to ScriptContext.Error and sends the
 -- text of errors from scripts that are not its own to the server (read in the decompiled "anti" module), so an
@@ -1724,6 +1724,14 @@ do
             log("remote: stop")
         elseif cmd == "cancel" then
             R.goal = nil
+        elseif cmd == "reset" then
+            -- owner allowed it (20:45): when the character is wedged, reset it the way the Roblox menu does
+            -- (health to 0 on our own Humanoid) and let the game respawn it at the spawn point
+            F.running = false
+            R.goal = nil
+            local h = C.hum()
+            log("remote: reset character" .. (h and "" or " (no humanoid)"))
+            if h then pcall(function() h.Health = 0 end) end
         elseif cmd == "mode" and rest ~= "" then
             F.cfg.mode = rest
             saveAll()
