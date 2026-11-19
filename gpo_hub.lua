@@ -8,6 +8,13 @@
 if game.GameId ~= 648454481 then return end
 
 local G = (getgenv and getgenv()) or _G
+
+-- ONE hub only. After a teleport the loader can run several times at once (autoexec + queue_on_teleport): on
+-- 2026-11-19 23:07 four copies of an older build ran together in a raid, every action four times, and spent the
+-- account's 9 real free points. Each start takes a number; after the waits only the newest number goes on, and
+-- every loop of an older copy ends because F.alive is tied to that number (see the watcher below).
+G.__gpo_hub_seq = (G.__gpo_hub_seq or 0) + 1
+local MY_SEQ = G.__gpo_hub_seq
 if G.__gpo_hub_stop then pcall(G.__gpo_hub_stop) end
 
 local Players = game:GetService("Players")
@@ -15,8 +22,24 @@ local HttpService = game:GetService("HttpService")
 if not game:IsLoaded() then pcall(function() game.Loaded:Wait() end) end
 local LP = Players.LocalPlayer
 while not LP do task.wait(0.2) LP = Players.LocalPlayer end
+task.wait(0.3)
+if G.__gpo_hub_seq ~= MY_SEQ then return end
 local FOLDER = "gpohub"
-local VERSION = "r_1"
+local VERSION = "one_1"
+
+-- Exact build. GitHub serves the main file from a cache for about 5 minutes, so a hub loaded right after a push
+-- can be an older build. gpohub/want.txt (written at push time on this PC) names the commit to run; a hub that
+-- is not that commit loads it once and steps aside.
+do
+    local okw, want = pcall(function() return isfile and isfile(FOLDER .. "/want.txt") and readfile(FOLDER .. "/want.txt") or nil end)
+    want = okw and type(want) == "string" and want:match("^%s*([0-9a-f]+)%s*$") or nil
+    if want and #want >= 7 and G.__gpo_hub_commit ~= want then
+        G.__gpo_hub_commit = want
+        local okd, src = pcall(function() return game:HttpGet("https://raw.githubusercontent.com/moseeri01/gpohub/" .. want .. "/gpo_hub.lua") end)
+        local fn = okd and type(src) == "string" and #src > 1000 and loadstring(src) or nil
+        if fn then task.spawn(fn) return end
+    end
+end
 
 -- Every thread the hub starts runs inside pcall. The game's anti-cheat listens to ScriptContext.Error and sends the
 -- text of errors from scripts that are not its own to the server (read in the decompiled "anti" module), so an
@@ -1876,7 +1899,8 @@ do
         pcall(function() writefile(RUN, HttpService:JSONEncode({ running = F.running, since = S.since })) end)
     end
     pcall(function()
-        if F.cfg.reloadHub and type(queue_on_teleport) == "function" then
+        if F.cfg.reloadHub and type(queue_on_teleport) == "function" and not G.__gpo_hub_queued then
+            G.__gpo_hub_queued = true   -- once per game session, however often the hub is reloaded
             queue_on_teleport('loadstring(game:HttpGet("https://raw.githubusercontent.com/moseeri01/gpohub/main/gpo_hub.lua?t=" .. tostring(os.time())))()')
         end
     end)
@@ -2935,6 +2959,17 @@ G.__gpo_hub_stop = function()
     pcall(function() gui:Destroy() end)
 end
 G.__gpo_hub = F
+F.stop = G.__gpo_hub_stop
+-- an older copy ends itself as soon as a newer one has started
+task.spawn(function()
+    while F.alive do
+        if G.__gpo_hub_seq ~= MY_SEQ then
+            pcall(F.stop)
+            break
+        end
+        task.wait(1)
+    end
+end)
 
 ensureFolder()
 log("loaded " .. VERSION)
