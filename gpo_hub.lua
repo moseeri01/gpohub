@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "m_28"
+local VERSION = "m_29"
 
 -- Every thread the hub starts runs inside pcall. The game's anti-cheat listens to ScriptContext.Error and sends the
 -- text of errors from scripts that are not its own to the server (read in the decompiled "anti" module), so an
@@ -999,6 +999,8 @@ do
     end
     -- other enemies recorded in the raid: Blugori, Kelvin, Santa, Kramprus, Snow Wolf (bosses / event) - only with the switch
     ID.KEYSPOT = Vector3.new(3026.3, 2075.9, -13411.0)
+    ID.WAVE1 = { Vector3.new(2984, 2077, -13576), Vector3.new(2965, 2076, -13691), Vector3.new(2939, 2076, -13806),
+        Vector3.new(2950, 2077, -13881), Vector3.new(2940, 2078, -13905), Vector3.new(2947, 2076, -13961) }
     -- hand route from the Impel Base spawn to the raid pad (recorded 17:45, Af_terdark)
     ID.PADROUTE = {
         Vector3.new(5913.8, 5.4, -9792.2), Vector3.new(5914.7, 5.4, -9817.8), Vector3.new(5916.3, 5.4, -9860.5), Vector3.new(5917.3, 5.4, -9886.0),
@@ -1160,14 +1162,26 @@ do
             local g = C.nearestMob(F.cfg.idFightRange, isGuard)
             if g then C.attack(g, F.cfg.idSkills) return end
         end
+        -- Start room ("GEAR UP AND FIND A WAY OUT"): loot for at most 4 minutes, then only what lies within 40 studs,
+        -- and head for the first wave. The hand run (17:50) walked 2984,-13576 -> 2965,-13691 -> 2939,-13806 ->
+        -- 2950,-13881, fought guards around 2940,-13900 and got "PROCEED THROUGH THE MAZE" at 2947,-13961.
+        local gear = ID.stage:find("GEAR UP", 1, true) ~= nil
+        if gear and not ID.gearT then ID.gearT = os.clock() end
+        local hurry = gear and ID.gearT and os.clock() - ID.gearT > 240
         if F.cfg.idLoot then
-            local p = nearestPrompt("loot", 120)
+            local p = nearestPrompt("loot", hurry and 40 or 120)
             if p then use(p, "drop", "loot") return end
         end
         if F.cfg.idChests then
             -- in the maze only chests close by, or the walk to each one fights the walls
-            local p = nearestPrompt("chest", (F.cfg.idMaze and ID.inMaze()) and 60 or 300)
+            local p = nearestPrompt("chest", ((F.cfg.idMaze and ID.inMaze()) and 60) or (hurry and 40) or 300)
             if p then use(p, "chest", "chests") return end
+        end
+        if gear then
+            F.status = "Start room done - walking to the first wave"
+            if not ID.waveLogged then ID.waveLogged = true log("impel: start room done (" .. ID.done.chests .. " chests), walking to the first wave") end
+            if not C.followRoute(ID.WAVE1, 6) then task.wait(0.5) end
+            return
         end
         if F.cfg.idMaze and ID.inMaze() then mazeStep() return end
         F.status = "Nothing near - walk on by hand (stage: " .. ID.stage .. ")"
