@@ -25,7 +25,7 @@ while not LP do task.wait(0.2) LP = Players.LocalPlayer end
 task.wait(0.3)
 if G.__gpo_hub_seq ~= MY_SEQ then return end
 local FOLDER = "gpohub"
-local VERSION = "t_1"
+local VERSION = "h_3"
 
 -- Exact build. GitHub serves the main file from a cache for about 5 minutes, so a hub loaded right after a push
 -- can be an older build. gpohub/want.txt (written at push time on this PC) names the commit to run; a hub that
@@ -89,7 +89,7 @@ local F = {
         -- Fishing
         fishSpot = "Rough Waters", fishBait = true, fishSell = true, fishKeepLeg = true, fishMegalodon = false,
         -- Level
-        lvlTarget = 675, lvlQuest = true, lvlMove = true, lvlStats = "Sword / Defense", autoStats = false, lvlHaki = false, lvlBlock = false,
+        lvlTarget = 675, lvlQuest = true, lvlMove = true, lvlStats = "Sword / Defense", autoStats = false, lvlHaki = false, lvlBlock = false, hover = false, hoverHeight = 5,
         -- Settings
         normalSpeed = true, sprint = true, keyWalk = true, geppo = true, stopNearPlayer = true, antiAfk = true, autoRejoin = false,
         discordAlert = false, pickUp = false, webhook = "", bossAlert = true, bossRange = 300, bossSkills = false,
@@ -914,6 +914,10 @@ do
         local h, hr = m:FindFirstChildOfClass("Humanoid"), m:FindFirstChild("HumanoidRootPart")
         if not h or not hr or h.Health <= 0 then return false end
         if m:FindFirstChildWhichIsA("ProximityPrompt", true) then return false end
+        -- t_16: quest givers have no prompt (Vel on Thriller Bark showed up as a mob): any name in the game s own
+        -- quest NPC table is not an enemy
+        local locs = F.session and F.session.locations
+        if locs and locs[m.Name] then return false end
         return true
     end
     function C.nearestMob(range, accept)
@@ -949,27 +953,35 @@ do
         if type(info) == "table" then return tostring(info.Type), RARE[tostring(info.Rare)] or 1 end
         return nil, 1
     end
+    -- t_3: the stat behind the weapon decides first. TEST fight 00:17: 6 damage/s with Iceborn Daggers on an account
+    -- with Sword Mastery 0 and Devil Fruit Mastery 725. Each class loses (its stat / 10) from its rank, so a 725
+    -- fruit (30 - 72) beats a sword at mastery 0 (4 .. 9), and inside the raid the built Sword stat wins again.
+    local function statOf(name)
+        local st = F.session and F.session.stat
+        return st and tonumber(st(name)) or 0
+    end
     local function weaponRank(t)
         if not t:IsA("Tool") or t:GetAttribute("Category") ~= "Weapons" then return nil end
-        if t:GetAttribute("devilFruit") then return 30 end
-        if t:GetAttribute("MeleeTool") then return 20 end
+        if t:GetAttribute("devilFruit") then return 30 - statOf("DevilFruitMastery") / 10 end
+        if t:GetAttribute("MeleeTool") then return 20 - statOf("Strength") / 10 end
         local ty, rare = itemType(t.Name)
-        if ty == "Gun" then return 40 end
-        return 10 - rare   -- sword: 4 (Mythical) .. 9 (Common)
+        if ty == "Gun" then return 40 - statOf("GunMastery") / 10 end
+        return 10 - rare - statOf("SwordMastery") / 10   -- sword: 4 (Mythical) .. 9 (Common) at mastery 0
     end
     function C.holdWeapon()
         local c = LP.Character
         if not c then return nil end
         local held = c:FindFirstChildOfClass("Tool")
-        if held and weaponRank(held) then return held end
         local bp = LP:FindFirstChild("Backpack")
-        local pick, best = nil, 99
+        local pick, best = nil, (held and weaponRank(held)) or 99
+        if held and best < 99 and os.clock() - (C.lastPick or 0) < 5 then return held end   -- look for a better one every 5 s
+        C.lastPick = os.clock()
         if bp then
             for _, t in ipairs(bp:GetChildren()) do
                 local rk = weaponRank(t)
                 if rk and rk < best then pick, best = t, rk end
             end
-            pick = pick or bp:FindFirstChild("Melee")
+            if best >= 99 then pick = pick or bp:FindFirstChild("Melee") end
         end
         if pick and C.hum() then
             pcall(function() C.hum():EquipTool(pick) end)
@@ -1058,6 +1070,51 @@ do
         end)
     end
 
+    -- h_2 (owner order 2026-11-20, test account): Hover = hold the character Height studs above the target with an
+    -- AlignPosition (normal physics constraint). No Gravity / HipHeight / WalkSpeed / guard changes, no hooks.
+    -- Test 03:00: 7.7 s + 7.2 s in the air over a Zombie Knight, no pull-back. The hold ends by itself 1 s after
+    -- the last C.attack beat (quest walk, back-off, stop), so it never stays on outside a fight.
+    local HV = { t = 0 }
+    C.hoverState = HV
+    function C.hoverOff()
+        if HV.ap then pcall(function() HV.ap:Destroy() end) pcall(function() HV.att:Destroy() end) HV.ap, HV.att = nil, nil end
+        HV.m = nil
+    end
+    function C.hoverOn(m)
+        local r = C.root()
+        if not r then return end
+        HV.m, HV.t = m, os.clock()
+        if HV.ap and HV.ap.Parent and HV.att.Parent == r then return end
+        C.hoverOff()
+        HV.m, HV.t = m, os.clock()
+        pcall(function()
+            local att = Instance.new("Attachment")
+            att.Name = "gh_att"
+            att.Parent = r
+            local ap = Instance.new("AlignPosition")
+            ap.Name = "gh_align"
+            ap.Mode = Enum.PositionAlignmentMode.OneAttachment
+            ap.Attachment0 = att
+            ap.MaxForce = 1e6
+            ap.MaxVelocity = 24          -- below the game's run speed 25
+            ap.Responsiveness = 25
+            ap.Position = r.Position
+            ap.Parent = r
+            HV.att, HV.ap = att, ap
+            HV.n = (HV.n or 0) + 1
+        end)
+    end
+    F.conns[#F.conns + 1] = game:GetService("RunService").Heartbeat:Connect(function()
+        if not HV.ap then return end
+        pcall(function()
+            local m = HV.m
+            local hr = m and m:FindFirstChild("HumanoidRootPart")
+            local h = m and m:FindFirstChildOfClass("Humanoid")
+            if not F.running or not F.cfg.hover or not hr or not h or h.Health <= 0 or os.clock() - HV.t > 1 then C.hoverOff() return end
+            HV.ap.Position = hr.Position + Vector3.new(0, F.cfg.hoverHeight or 5, 0)
+        end)
+    end)
+
     -- one attack beat on a mob: close in, face it, swing, maybe a skill
     function C.attack(m, useSkills)
         local hr, h = m:FindFirstChild("HumanoidRootPart"), m:FindFirstChildOfClass("Humanoid")
@@ -1068,7 +1125,11 @@ do
         -- 1.2 s per beat; only far ones use the path walk.
         local r = C.root()
         local d0 = r and (hr.Position - r.Position).Magnitude or 999
-        if d0 > 45 then
+        local hovering = F.cfg.hover and d0 <= 30
+        if hovering then
+            C.hoverOn(m)
+            if d0 > 9 then task.wait(0.3) end
+        elseif d0 > 45 then
             C.walkTo(hr.Position, ATK.reach, 4, function() return h.Health <= 0 end)
         elseif d0 > ATK.reach + 1 then
             local hm = C.hum()
@@ -1090,9 +1151,14 @@ do
         local tool = C.holdWeapon()
         if close then
             local mk = ATK.mark
-            if mk == nil or mk.m ~= m then
+            if mk == nil then
                 mk = { m = m, hp = h.Health, dmg = dmgStat(), sw = swingMark(), t = os.clock(), swung = false }
                 ATK.mark = mk
+            elseif mk.m ~= m then
+                -- t_5: another target (the nearest of a guard group changes all the time) keeps the 4 s timer and the
+                -- swing mark; a new mark per target meant the timer never ran out and the way was never changed
+                mk.m = m
+                mk.hp = h.Health
             end
             if swingMark() ~= mk.sw then
                 mk.swung = true
@@ -1121,13 +1187,28 @@ do
                 ATK.mark = nil
             end
         end
-        swing(tool)
+        local skillDue = useSkills and close and (ATK.proven or ATK.tries >= #ATK.names) and os.clock() - lastSkill > 1.5
+        if skillDue then task.wait(0.5) else swing(tool) end   -- t_19: no M1 right before a skill (M1 keeps _G.canuse false)
         -- no skills until a swing way is proven (or every way was tried), so the proof is not a skill s damage
         if useSkills and close and (ATK.proven or ATK.tries >= #ATK.names) and os.clock() - lastSkill > 1.5 then
             lastSkill = os.clock()
             skillN = skillN % #SKILL_KEYS + 1
             aim(hr.Position)
-            C.key(SKILL_KEYS[skillN])
+            local hpBefore = h.Health
+            local st0 = C.stamina()
+            C.key(SKILL_KEYS[skillN], 0.6)   -- t_18: fruit skills charge while held and fire on release (ChargeSkill)
+            -- t_4 logging (no cause known yet for 48 damage in 30 s with a 725 fruit): per key, how often it was
+            -- pressed and how often the character then showed usingSkill = true within 0.4 s
+            local kn = SKILL_KEYS[skillN].Name
+            ATK.keys = ATK.keys or {}
+            local rec = ATK.keys[kn] or { p = 0, u = 0 }
+            ATK.keys[kn] = rec
+            rec.p = rec.p + 1
+            local c = LP.Character
+            task.wait(0.4)
+            local st1 = C.stamina()
+            if st0 and st1 and st1 < st0 then rec.u = rec.u + 1 end   -- t_19: "used" = stamina went down (the skill was cast)
+            rec.hit = (rec.hit or 0) + ((h.Health < hpBefore - 0.5) and 1 or 0)
         end
         task.wait(0.25)
     end
@@ -2210,6 +2291,79 @@ local ROUTE = {
     { f = 650, t = 675, q = "Shatter the Mirror", n = "Jerome", m = "Mochi Emperor", b = "Mochi Emperor", a = 1, y = "Defeat" },
     { f = 325, t = 675, q = "Go to the second sea", n = "Gatekeeper Puff", m = "", b = "", a = 0, y = "" },
 }
+
+-- LOCALQ: q = quest name, n = NPC, m = mob, a = amount (Defeat quests only, from the NPC talk scripts)
+local LOCALQ = {
+    { q = "Help Anty", n = "Anty", m = "Civilian", a = 10 },
+    { q = "Help Vi", n = "Vi", m = "Saw Shark", a = 1 },
+    { q = "Help Waby", n = "Waby", m = "Saw Shark Pirate", a = 10 },
+    { q = "Help Rice", n = "Chef Rice", m = "Krieg Pirate", a = 8 },
+    { q = "Help Nami", n = "Aria", m = "Star Clown", a = 1 },
+    { q = "Help crim", n = "City Criminal", m = "Kingdom Guards", a = 6 },
+    { q = "Help Dabo", n = "Dabo", m = "Mini Bunny", a = 10 },
+    { q = "Help Mythra", n = "Mythra", m = "Blo The Bunny", a = 1 },
+    { q = "Help Fhan", n = "Fhan", m = "Crab King Cho", a = 1 },
+    { q = "Help becky", n = "Becky", m = "Fishman Karate User", a = 5 },
+    { q = "Help janny", n = "Janny", m = "Neptune", a = 1 },
+    { q = "Help jenny", n = "Jenny", m = "Ryu", a = 1 },
+    { q = "Help Miska", n = "Miska", m = "Gravito's Undermen", a = 4 },
+    { q = "Help Yourg", n = "Yourg", m = "Gravito's Guards", a = 3 },
+    { q = "Help Zanny", n = "Zanny", m = "Gravito", a = 1 },
+    { q = "Road to Armament", n = "Ray", m = "Yeti", a = 25 },
+    { q = "Help Admiral Frosty", n = "Admiral Frosty", m = "Captain Zhen", a = 1 },
+    { q = "Help Frutose", n = "Frutose", m = "Flame Admiral Zeke", a = 1 },
+    { q = "Help Higa", n = "Higa", m = "Marine Fort Kiribachi User", a = 1 },
+    { q = "Help Pichu", n = "Pichu", m = "Marine Fort Gunner", a = 4 },
+    { q = "Help Wane", n = "Wane", m = "Marine Fort Sniper", a = 2 },
+    { q = "Help Zen", n = "Zen", m = "Zou Inhabitant", a = 7 },
+    { q = "Help Anty", n = "Anty", m = "Donmingo", a = 1 },
+    { q = "Help Anty", n = "Anty", m = "Kraken", a = 3 },
+    { q = "Help Anty", n = "Anty", m = "Pharaoh Akshan", a = 1 },
+    { q = "Help Anty", n = "Anty", m = "Moria", a = 1 },
+    { q = "Help Anty", n = "Anty", m = "Lucy", a = 1 },
+    { q = "Help Anty", n = "Anty", m = "Hawk Eye", a = 1 },
+    { q = "Help Anty", n = "Anty", m = "Radiant Admiral", a = 1 },
+    { q = "Help Admiral Jackson", n = "Admiral Jackson", m = "Law", a = 1 },
+    { q = "Help Ian", n = "Ian", m = "Donmingo Family", a = 4 },
+    { q = "Help Marine Scout Milli", n = "Marine Scout Milli", m = "Pica", a = 1 },
+    { q = "Help Niki", n = "Niki", m = "Bellom", a = 1 },
+    { q = "Help PJ", n = "PJ", m = "Crazy Wolf", a = 6 },
+    { q = "Help Somi", n = "Somi", m = "Donmingo", a = 1 },
+    { q = "Help Warren", n = "Warren", m = "Scientist", a = 15 },
+    { q = "Help Samira", n = "Samira", m = "Pharaoh Akshan", a = 1 },
+    { q = "Help Noah", n = "Noah", m = "Desert Bandit", a = 7 },
+    { q = "Take down Lucid", n = "Tyrone", m = "Lucid", a = 1 },
+    { q = "hunt egirl", n = "Santa (HURT)", m = "Kramprus", a = 1 },
+    { q = "Serve Justice", n = "Gozen", m = "Axe Hand Logan", a = 1 },
+    { q = "Help Kevin", n = "Kevin", m = "Shell's Bandit", a = 8 },
+    { q = "Help Robert", n = "Robert", m = "Corrupt Marine", a = 8 },
+    { q = "Help bibby", n = "Bibby", m = "Malcolm's Undermen", a = 6 },
+    { q = "Help jeff", n = "Jeff", m = "Thunder God", a = 1 },
+    { q = "Help musk", n = "Musk", m = "Head Guardian", a = 1 },
+    { q = "Help rae", n = "Rae", m = "Bruno", a = 1 },
+    { q = "Help raze", n = "Raze", m = "Sky Guardian", a = 10 },
+    { q = "Help vego", n = "Vego", m = "Sky District Bandit", a = 5 },
+    { q = "Help viva", n = "Viva", m = "Malcolm", a = 1 },
+    { q = "Help zhen", n = "Zhen", m = "Castle Guard", a = 5 },
+    { q = "Help gonny", n = "Gonny", m = "Monkey", a = 10 },
+    { q = "Help max", n = "Max", m = "Gorilla King", a = 1 },
+    { q = "Help Daph", n = "Daph", m = "Bandit", a = 5 },
+    { q = "Help Ronny", n = "Ronny", m = "Bandit Boss", a = 1 },
+    { q = "Help Admiral Yon", n = "Admiral Yon", m = "Moria", a = 1 },
+    { q = "Help Eli", n = "Eli", m = "Borj", a = 1 },
+    { q = "Help Jag", n = "Jag", m = "Ryuma", a = 1 },
+    { q = "Help Marine Scout Rae", n = "Marine Scout Rae", m = "Zombie Knight", a = 6 },
+    { q = "Help Poro", n = "Poro", m = "Zombie", a = 10 },
+    { q = "Help Vak", n = "Vak", m = "Civilian", a = 10 },
+    { q = "Free the Captive", n = "Gwen", m = "Juice Empress", a = 1 },
+    { q = "Shatter the Mirror", n = "Jerome", m = "Mochi Emperor", a = 1 },
+    { q = "Clear the Chess Guards", n = "Jess", m = "Chess Soldier", a = 30 },
+    { q = "End Big Mama", n = "Lucas", m = "Big Mama", a = 1 },
+    { q = "Guard at the Glass", n = "Mira", m = "Biscuit Commander", a = 1 },
+    { q = "The Forest Outcast", n = "Silas", m = "Pedro", a = 1 },
+    { q = "Help Zaki", n = "Zaki", m = "Civilian", a = 10 },
+    { q = "Help Zerus", n = "Zerus", m = "Crab Minion", a = 5 },
+}
 --------------------------------------------------------------------------------
 -- Level mode (lv_1, 2026-11-19): quest loop along the game's own level route (ROUTE, src/route_data.lua).
 --   1. Stats.Level picks the step (LevelRequirement <= level < UntilLevel; plain mob quests before boss gates).
@@ -2263,6 +2417,24 @@ do
         return L.state .. "  |  quest: " .. cur .. "  " .. pr .. ((s and s.a > 0) and ("/" .. s.a) or "")
     end
 
+    -- is a mob of this name loaded within 1500? (cached 10 s per name)
+    local seenAt = {}
+    L.skipQ = {}
+    function L.mobSeen(name)
+        local c = seenAt[name]
+        if c and os.clock() - c.t < 10 then return c.v end
+        local want = name:lower()
+        -- t_23: count them too (4 Zombie Knights for a quest of 6 = minutes of waiting for respawns, 02:28)
+        local cnt = 0
+        local m = C.nearestMob(1500, function(mob)
+            local n = mob.Name:lower()
+            local ok = n == want or n == want .. "s" or n .. "s" == want
+            if ok then cnt = cnt + 1 end
+            return ok
+        end)
+        seenAt[name] = { t = os.clock(), v = m ~= nil, c = cnt }
+        return m ~= nil
+    end
     local function takeQuest(s)
         if os.clock() - L.lastTake < 6 then return end
         L.lastTake = os.clock()
@@ -2294,14 +2466,44 @@ do
             return
         end
         local s = pickStep(level)
-        if s ~= L.step then
+        if s ~= L.step and s ~= L.routeStep then
+            L.routeStep = s
             L.step = s
             log("level: step for level " .. level .. " = " .. (s and (s.q .. " / " .. s.n .. " / " .. s.m) or "none"))
         end
-        if not s then F.status = "Level: no route step for level " .. level return end
-
         local r = C.root()
         if not r then return end
+        -- t_20: the route step s quest NPC is on another island (no sea travel in this mode) -> take the nearest
+        -- plain Defeat quest of this island instead (LOCALQ, every Defeat quest of the game); the quest already
+        -- running wins.
+        local function far(st)
+            local p = st and npcPos(st.n)
+            return not p or (p - r.Position).Magnitude > 1500
+        end
+        if far(s) then
+            local cur0 = questNow()
+            local best, bd = nil, 7000
+            for _, o in ipairs(LOCALQ) do
+                local p = npcPos(o.n)
+                -- only quests whose mob is loaded near me (02:14: picked Admiral Yon = Moria, a boss, because he stood closest)
+                local mobHere = L.mobSeen(o.m)
+                if p and not L.skipQ[o.q] and (mobHere or o.q == cur0) then
+                    -- amount 1 = a boss: only when nothing else is here (+5000)
+                    local have = (seenAt[o.m] and seenAt[o.m].c) or 0
+                    local d = (o.q == cur0) and -1 or ((p - r.Position).Magnitude + ((o.a <= 1) and 5000 or 0) + ((have < o.a) and 2500 or 0))
+                    if d < bd then best, bd = o, d end
+                end
+            end
+            if best then
+                if L.localQ ~= best.q then
+                    L.localQ = best.q
+                    log("level: route NPC " .. (s and s.n or "-") .. " is on another island - using " .. best.q .. " / " .. best.n .. " / " .. best.m .. " x" .. best.a .. " here")
+                end
+                s = { f = 0, t = 9999, q = best.q, n = best.n, m = best.m, b = "", a = best.a, y = "Defeat" }
+                L.step = s
+            end
+        end
+        if not s then F.status = "Level: no route step for level " .. level return end
         -- low HP: away from the nearest enemy, wait for 70 %
         if L.backing and C.hpPct() >= 70 then L.backing = false end
         if C.hpPct() < F.cfg.retreatHp then L.backing = true end
@@ -2378,11 +2580,21 @@ do
             return n == want or n == want .. "s" or n .. "s" == want
         end)
         if not m then
+            -- t_22: the quest s mob does not show up (boss gone, other island) -> quit it like the quest window does
+            L.noMobSince = L.noMobSince or os.clock()
+            if os.clock() - L.noMobSince > 60 and cur ~= "None" then
+                L.noMobSince = nil
+                L.skipQ[cur] = true
+                local okq = pcall(function() game:GetService("ReplicatedStorage").Events.Quest:InvokeServer({ "quit" }) end)
+                log("level: no " .. s.m .. " for 60 s - quit quest " .. cur .. (okq and "" or " (call failed)"))
+                return
+            end
             L.state = "no mob"
             F.status = "Level: no " .. s.m .. " loaded near - waiting / walking to the quest area"
             if pos and (pos - r.Position).Magnitude > 120 then C.walkTo(pos, 30, 20) else task.wait(1) end
             return
         end
+        L.noMobSince = nil
         L.state = "fighting"
         local mh = m:FindFirstChildOfClass("Humanoid")
         local t0 = os.clock()
@@ -2622,6 +2834,9 @@ do
                 F.running = true
                 log("remote: goto " .. rest)
             end
+        elseif cmd == "ui" then
+            -- hide / show the hub window so a screenshot shows the game (same as the Ctrl key)
+            pcall(function() win.Visible = (rest == "on") end)
         elseif cmd == "dev" then
             -- fast test round (loop v2): load the build that build.ps1 copied to gpohub/dev.lua, in this session.
             -- The new copy stops this one first (G.__gpo_hub_stop: loops end, connections cut, window destroyed).
@@ -2629,6 +2844,12 @@ do
             local fn = ok and type(src) == "string" and #src > 1000 and loadstring(src) or nil
             log("remote: dev load " .. (fn and "ok" or "FAILED"))
             if fn then G.__gpo_hub_dev = true task.spawn(fn) end
+        elseif cmd == "run" then
+            -- run <file.lua>: one stand-alone test script from the Volt workspace (e.g. hover_test.lua), in pcall
+            local ok, src = pcall(function() return readfile(rest) end)
+            local fn = ok and type(src) == "string" and loadstring(src) or nil
+            log("remote: run " .. rest .. (fn and "" or " FAILED"))
+            if fn then task.spawn(function() pcall(fn) end) end
         elseif cmd == "test" then
             local piece, args = rest:match("^(%S+)%s*(.-)$")
             task.spawn(function() R.test(piece or "", args or "") end)
@@ -2688,13 +2909,16 @@ do
     F.onLog = R.onLog
     task.spawn(function()
         local lastStatus, since, wasAlive = "", os.clock(), true
+        local lastPos = nil   -- t_2: a long walk keeps one status; only standing still counts
         while F.alive do
             task.wait(1)
             local al = C.alive()
             if wasAlive and not al and C.char() then R.snap("died") end
             wasAlive = al
-            if F.status ~= lastStatus then lastStatus = F.status since = os.clock()
-            elseif F.running and os.clock() - since > 20 then since = os.clock() R.snap("same status 20 s") end
+            local rr = C.root()
+            local moved = rr and lastPos and (rr.Position - lastPos).Magnitude > 6
+            if F.status ~= lastStatus or moved or not lastPos then lastStatus = F.status since = os.clock() lastPos = rr and rr.Position or nil
+            elseif F.running and os.clock() - since > 20 then since = os.clock() R.snap("same status and place 20 s") end
         end
     end)
 
@@ -2711,7 +2935,7 @@ do
         F.cfg.mode = "Test"
         F.running = true
         F.status = "Test " .. piece
-        local pass, info = false, "unknown piece (fight chest drop walk maze build)"
+        local pass, info = false, "unknown piece (fight chest drop walk maze build board sail)"
         local ok, err = pcall(function()
             if piece == "fight" then
                 local sec = tonumber(args) or 20
@@ -2728,6 +2952,10 @@ do
                 info = string.format("%s hp %.0f -> %.0f (dealt %.0f, leaderstat +%.0f) own hp %.0f -> %.0f method %s held %s swings %s in %.0f s",
                     m.Name, mhp0, math.max(0, mh.Health), dealt, dmgNow() - dmg0, hp0, h2 and h2.Health or 0,
                     tostring(C.atk.names and C.atk.names[C.atk.method] or C.atk.method), heldName(), tostring(C.atk.swings), os.clock() - t0)
+                local ks = {}
+                for k, v in pairs(C.atk.keys or {}) do ks[#ks + 1] = k .. " cast " .. v.u .. " hit " .. (v.hit or 0) .. "/" .. v.p end
+                C.atk.keys = {}
+                info = info .. " proven " .. tostring(C.atk.proven) .. " reach " .. tostring(C.atk.reach) .. " skills(used/pressed) " .. table.concat(ks, " ") .. " stam " .. tostring(C.stamina and C.stamina() or "?")
             elseif piece == "chest" or piece == "drop" then
                 pass, info = F.impel.testUse(piece == "drop" and "loot" or "chest")
             elseif piece == "walk" then
@@ -2744,6 +2972,375 @@ do
                 local dt = os.clock() - t0
                 pass = left <= 8
                 info = string.format("%.0f studs in %.0f s (%.1f /s) left %.0f calls %d", (r0 - goal).Magnitude - left, dt, ((r0 - goal).Magnitude - left) / math.max(dt, 0.1), left, t)
+            elseif piece == "board" then
+                -- sea travel step 2 (t_6): get into the driver seat of my own ship. The ship is a plain VehicleSeat
+                -- boat (game script ShipManager reads Seat.Occupant / Throttle / Steer), so sitting = touching the seat.
+                local ships = workspace:FindFirstChild("Ships")
+                local mine = ships and ships:FindFirstChild(LP.Name .. "Ship")
+                local spawned = "had one"
+                if not mine then
+                    local ev = game:GetService("ReplicatedStorage"):FindFirstChild("Events")
+                    ev = ev and ev:FindFirstChild("ShipEvents")
+                    ev = ev and ev:FindFirstChild("Spawn")
+                    local okS, v = pcall(function() return ev:InvokeServer("true") end)
+                    spawned = "spawn " .. tostring(okS and v)
+                    task.wait(3)
+                    ships = workspace:FindFirstChild("Ships")
+                    mine = ships and ships:FindFirstChild(LP.Name .. "Ship")
+                end
+                if not mine then info = "no ship (" .. spawned .. ")" return end
+                local seat = mine:FindFirstChildWhichIsA("VehicleSeat", true)
+                if not seat then info = "ship has no VehicleSeat" return end
+                local h = C.hum()
+                local function dist() local r = C.root() return r and (r.Position - seat.Position).Magnitude or 999 end
+                local d0, how = dist(), "walk"
+                -- t_9: the game s own way first - key P = Callbacks.ShipSeat:PC_Activate() (server seats the player)
+                C.noSit(false)
+                local ic = C.input()
+                local cb = ic and ic.Callbacks and ic.Callbacks.ShipSeat
+                if cb and d0 <= 10 then   -- the server picks the nearest seat: only useful next to the helm
+                    how = "game ShipSeat call"
+                    task.spawn(function() pcall(function() cb:PC_Activate() end) end)
+                    local t9 = os.clock()
+                    while not h.SeatPart and os.clock() - t9 < 5 do task.wait(0.2) end
+                end
+                if h.SeatPart then
+                    local sp = h.SeatPart
+                    pass = sp == seat
+                    info = string.format("%s | seated in %s (%s) @ %.0f,%.0f,%.0f by %s | driver seat %.0f,%.0f,%.0f | was %.0f away", spawned, sp.Name, sp.ClassName,
+                        sp.Position.X, sp.Position.Y, sp.Position.Z, how, seat.Position.X, seat.Position.Y, seat.Position.Z, d0)
+                    return
+                end
+                if d0 > 8 then C.walkTo(seat.Position, 4, 15) end
+                C.noSit(false)
+                local d1 = dist()
+                if h.SeatPart ~= seat and d1 <= 25 then
+                    how = "step on"
+                    local t1 = os.clock()
+                    while h.SeatPart ~= seat and os.clock() - t1 < 4 do
+                        pcall(function() h:MoveTo(seat.Position) end)
+                        task.wait(0.2)
+                    end
+                end
+                -- t_7: the seat is on the deck, ~22 studs above the pier / water line (TEST board 00:58: dist 23, straight
+                -- below it). Climb with the game s own sky walk: jump, then Geppo while moving at the seat.
+                local r1 = C.root()
+                if h.SeatPart ~= seat and r1 and seat.Position.Y - r1.Position.Y > 6 and dist() <= 40 then
+                    how = "space climb"
+                    for _ = 1, 3 do
+                        -- t_10: the player way - Space to jump, Space again in the air = the game s own Geppo
+                        -- (Movements.lua:162). The callback call in t_7 used no stamina at all.
+                        local function space()
+                            pcall(function()
+                                C.VIM:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
+                                task.wait(0.08)
+                                C.VIM:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
+                            end)
+                        end
+                        local y0, n = C.root().Position.Y, 0
+                        space()
+                        task.wait(0.3)
+                        for _ = 1, 14 do
+                            local rr = C.root()
+                            if h.SeatPart == seat or not rr or rr.Position.Y > seat.Position.Y + 4 then break end
+                            pcall(function() h:MoveTo(seat.Position) end)
+                            space()
+                            n = n + 1
+                            task.wait(0.35)
+                        end
+                        local rr2 = C.root()
+                        log(string.format("board: space climb %d presses, y %.0f -> %.0f, stamina %s", n, y0, rr2 and rr2.Position.Y or 0, tostring(C.stamina())))
+                        local t2 = os.clock()
+                        while h.SeatPart ~= seat and os.clock() - t2 < 2.5 do
+                            pcall(function() h:MoveTo(seat.Position) end)
+                            task.wait(0.15)
+                        end
+                        if h.SeatPart == seat or dist() <= 8 then break end
+                    end
+                end
+                local d2 = dist()
+                if h.SeatPart ~= seat and d2 <= 10 then
+                    how = "seat:Sit"
+                    pcall(function() seat:Sit(h) end)
+                    task.wait(0.6)
+                end
+                pass = h.SeatPart == seat
+                local r = C.root()
+                info = string.format("%s | seat %.0f,%.0f,%.0f | dist %.0f -> %.0f -> %.0f | seated %s by %s | me %.0f,%.0f,%.0f | seat max %s", spawned,
+                    seat.Position.X, seat.Position.Y, seat.Position.Z, d0, d1, d2, tostring(pass), how, r.Position.X, r.Position.Y, r.Position.Z, tostring(seat.MaxSpeed))
+            elseif piece == "gui" then
+                -- read only (t_15): write every text of another hub s window (by a word in it) to gpohub/gui_<word>.txt
+                local word = (args ~= "" and args or "SPECTRUM"):upper()
+                local roots = {}
+                pcall(function() if gethui then roots[#roots + 1] = gethui() end end)
+                pcall(function() roots[#roots + 1] = game:GetService("CoreGui") end)
+                pcall(function() roots[#roots + 1] = LP:FindFirstChildOfClass("PlayerGui") end)
+                local found, lines, seen = nil, {}, {}
+                for _, root in ipairs(roots) do
+                    for _, g in ipairs(root:GetChildren()) do
+                        local okd, ds = pcall(function() return g:GetDescendants() end)
+                        if okd and g ~= gui then
+                            for _, d in ipairs(ds) do
+                                if (d:IsA("TextLabel") or d:IsA("TextButton")) and tostring(d.Text):upper():find(word, 1, true) then found = g break end
+                            end
+                        end
+                        if found then break end
+                    end
+                    if found then break end
+                end
+                if not found then info = "no window with " .. word return end
+                for _, d in ipairs(found:GetDescendants()) do
+                    if d:IsA("TextLabel") or d:IsA("TextButton") or d:IsA("TextBox") then
+                        local t = tostring(d:IsA("TextBox") and (d.Text ~= "" and d.Text or d.PlaceholderText) or d.Text):gsub("%s+", " ")
+                        if t ~= "" and not seen[t] then
+                            seen[t] = true
+                            local path = {}
+                            local p = d.Parent
+                            for _ = 1, 3 do if p and p ~= found then table.insert(path, 1, p.Name) p = p.Parent end end
+                            lines[#lines + 1] = table.concat(path, "/") .. " | " .. d.ClassName .. " | " .. t
+                        end
+                    end
+                end
+                pcall(function() writefile(FOLDER .. "/gui_" .. word:lower() .. ".txt", table.concat(lines, string.char(10))) end)
+                pass, info = true, found.Name .. ": " .. #lines .. " texts written to gui_" .. word:lower() .. ".txt"
+            elseif piece == "ground" then
+                -- read only (t_17): ground height map around cx cz (rays down from y 400), half size h, step st.
+                -- One log line per row (north first): heights, w = water / nothing
+                local cx, cz, hs, st = args:match("^(-?[%d%.]+)%s+(-?[%d%.]+)%s+(%d+)%s+(%d+)")
+                cx, cz, hs, st = tonumber(cx), tonumber(cz), tonumber(hs), tonumber(st)
+                if not st then info = "ground needs cx cz half step" return end
+                local rp = RaycastParams.new()
+                rp.FilterType = Enum.RaycastFilterType.Exclude
+                rp.FilterDescendantsInstances = { LP.Character }
+                for z = cz - hs, cz + hs, st do
+                    local row = {}
+                    for x = cx - hs, cx + hs, st do
+                        local hit = workspace:Raycast(Vector3.new(x, 400, z), Vector3.new(0, -500, 0), rp)
+                        row[#row + 1] = (hit and hit.Position.Y > 2) and string.format("%3d", math.floor(hit.Position.Y)) or "  w"
+                    end
+                    log("ground z " .. math.floor(z) .. ": " .. table.concat(row, " "))
+                end
+                pass, info = true, string.format("x from %d to %d step %d", cx - hs, cx + hs, st)
+            elseif piece == "hull" then
+                -- read only (t_14): look for a way into a walled island. Rays east (+X) from x0 at heights 4 and 12,
+                -- every 40 studs of z from z1 to z2; prints where each ray hits (x) - a gap shows as a far or no hit.
+                local x0, z1, z2 = args:match("^(-?[%d%.]+)%s+(-?[%d%.]+)%s+(-?[%d%.]+)")
+                x0, z1, z2 = tonumber(x0), tonumber(z1), tonumber(z2)
+                if not z2 then info = "hull needs x0 z1 z2" return end
+                local rp = RaycastParams.new()
+                rp.FilterType = Enum.RaycastFilterType.Exclude
+                rp.FilterDescendantsInstances = { LP.Character }
+                local rows = {}
+                for _, y in ipairs({ 4, 12 }) do
+                    local row = {}
+                    for z = z1, z2, (z2 > z1) and 40 or -40 do
+                        local hit = workspace:Raycast(Vector3.new(x0, y, z), Vector3.new(3000, 0, 0), rp)
+                        row[#row + 1] = math.floor(z) .. ":" .. (hit and math.floor(hit.Position.X) or "-")
+                    end
+                    log("hull y " .. y .. ": " .. table.concat(row, " "))
+                end
+                pass, info = true, "see hull lines"
+            elseif piece == "sea" then
+                -- sea walk (t_13). Game fact (gpohub/src 0004_WaterLogia.lua): a logia fruit listed in
+                -- ReplicatedStorage.Util.WaterLogia (Magu here) with Settings.Logia on is held on top of the water by the
+                -- game itself (it sets the root height to the ocean height every frame). So crossing = walking like a
+                -- player: run (double W, hold W) and steer with the camera, straight at x z. No jumps over water.
+                local x, z, sec = args:match("^(-?[%d%.]+)[%s,]+(-?[%d%.]+)%s*(%d*)")
+                if not x then info = "sea needs x z [sec]" return end
+                local goal = Vector3.new(tonumber(x), 0, tonumber(z))
+                sec = tonumber(sec) or 300
+                local RS = game:GetService("ReplicatedStorage")
+                local st = RS:FindFirstChild("Stats" .. LP.Name)
+                local df = st and st.Stats:FindFirstChild("DF")
+                local logia = st and st:FindFirstChild("Settings") and st.Settings:FindFirstChild("Logia")
+                local wl = RS:FindFirstChild("Util") and RS.Util:FindFirstChild("WaterLogia")
+                local canWater = df and wl and wl:FindFirstChild(tostring(df.Value)) ~= nil
+                log(string.format("sea: fruit %s, water-walk fruit %s, Logia setting %s", tostring(df and df.Value), tostring(canWater), tostring(logia and logia.Value)))
+                if not canWater or not (logia and logia.Value == true) then info = "this character cannot stand on water (see the sea: line)" return end
+                local VIM, cam = C.VIM, workspace.CurrentCamera
+                local h, r = C.hum(), C.root()
+                local p0, t0 = r.Position, os.clock()
+                local oldType = cam.CameraType
+                local lowest, why = r.Position.Y, "timeout"
+                local conn = game:GetService("RunService").RenderStepped:Connect(function()
+                    pcall(function()
+                        local rr = C.root()
+                        local d = Vector3.new(goal.X - rr.Position.X, 0, goal.Z - rr.Position.Z)
+                        if d.Magnitude < 1 then return end
+                        d = d.Unit
+                        cam.CFrame = CFrame.lookAt(rr.Position - d * 14 + Vector3.new(0, 7, 0), rr.Position + d * 6)
+                    end)
+                end)
+                pcall(function() cam.CameraType = Enum.CameraType.Scriptable end)
+                local function key(on) pcall(function() VIM:SendKeyEvent(on, Enum.KeyCode.W, false, game) end) end
+                key(true) task.wait(0.06) key(false) task.wait(0.06) key(true)   -- double W = run
+                local lastLog, lastPos = os.clock(), r.Position
+                while F.alive and F.running and C.alive() and os.clock() - t0 < sec do
+                    r = C.root()
+                    if not r then why = "no character" break end
+                    lowest = math.min(lowest, r.Position.Y)
+                    local left = Vector3.new(goal.X - r.Position.X, 0, goal.Z - r.Position.Z).Magnitude
+                    if left < 40 then why = "arrived" break end
+                    if r.Position.Y < -6 then why = "sinking" break end
+                    if os.clock() - lastLog > 15 then
+                        local moved = (r.Position - lastPos).Magnitude
+                        log(string.format("sea: %.0f left, %.0f studs in 15 s, y %.0f, hp %.0f, floor %s", left, moved, r.Position.Y, h.Health, h.FloorMaterial.Name))
+                        if moved < 20 then why = "blocked" break end
+                        lastLog, lastPos = os.clock(), r.Position
+                    end
+                    task.wait(0.1)
+                end
+                key(false)
+                pcall(function() conn:Disconnect() end)
+                pcall(function() cam.CameraType = oldType end)
+                r = C.root()
+                local moved = r and (Vector3.new(r.Position.X - p0.X, 0, r.Position.Z - p0.Z)).Magnitude or 0
+                local dt = os.clock() - t0
+                pass = why == "arrived"
+                info = string.format("%s | %.0f studs in %.0f s (%.1f /s) | lowest y %.0f | now %.0f,%.0f,%.0f hp %.0f", why, moved, dt, moved / math.max(dt, 0.1), lowest,
+                    r and r.Position.X or 0, r and r.Position.Y or 0, r and r.Position.Z or 0, h.Health)
+            elseif piece == "mobs" then
+                -- read only (t_12): every loaded enemy by name - count, nearest distance, level of hp, where
+                local r = C.root()
+                local by = {}
+                local function scan(folder)
+                    if not folder then return end
+                    for _, m in ipairs(folder:GetChildren()) do
+                        local hr, mh = m:FindFirstChild("HumanoidRootPart"), m:FindFirstChildOfClass("Humanoid")
+                        if hr and mh and C.isMob(m) then
+                            local d = (hr.Position - r.Position).Magnitude
+                            local e = by[m.Name]
+                            if not e then e = { n = 0, d = 1e9, hp = mh.MaxHealth } by[m.Name] = e end
+                            e.n = e.n + 1
+                            if d < e.d then e.d = d e.p = hr.Position end
+                        end
+                    end
+                end
+                scan(workspace:FindFirstChild("NPCs"))
+                local list = {}
+                for n, e in pairs(by) do list[#list + 1] = { n = n, e = e } end
+                table.sort(list, function(x, y) return x.e.d < y.e.d end)
+                local out = {}
+                for i = 1, math.min(14, #list) do
+                    local e = list[i].e
+                    out[#out + 1] = string.format("%s x%d %.0f away maxhp %.0f @ %.0f,%.0f,%.0f", list[i].n, e.n, e.d, e.hp, e.p.X, e.p.Y, e.p.Z)
+                end
+                local lvl = tonumber(F.session.stat("Level")) or 0
+                pass = #list > 0
+                info = string.format("me %.0f,%.0f,%.0f level %d | %d kinds: %s", r.Position.X, r.Position.Y, r.Position.Z, lvl, #list, table.concat(out, " ; "))
+            elseif piece == "ships" then
+                -- read only (t_11): which ships the account owns (Stats<name>.Inventory, typed by the game item table)
+                local RS = game:GetService("ReplicatedStorage")
+                local folder = RS:FindFirstChild("Stats" .. LP.Name)
+                local inv = folder and folder:FindFirstChild("Inventory")
+                if not inv then info = "no inventory folder" return end
+                local okT, desc = pcall(function() return require(RS.Modules.ToolDesc) end)
+                local ships, other = {}, 0
+                local eq = inv:FindFirstChild("EquipedShip")
+                local function look(o)
+                    local nm = o.Name
+                    local okv, v = pcall(function() return o.Value end)
+                    local d = okT and type(desc) == "table" and (desc[nm] or (okv and type(v) == "string" and desc[v]))
+                    if type(d) == "table" and d.Type == "Ship" then
+                        ships[#ships + 1] = (desc[nm] and nm or tostring(v)) .. (okv and (" =" .. tostring(v)) or "")
+                    else other = other + 1 end
+                end
+                local names = {}
+                for _, o in ipairs(inv:GetChildren()) do names[#names + 1] = o.Name .. "(" .. o.ClassName:gsub("Value", "") .. "," .. #o:GetChildren() .. ")" end
+                log("inventory: " .. table.concat(names, " "):sub(1, 900))
+                for _, o in ipairs(inv:GetChildren()) do
+                    look(o)
+                    for _, c in ipairs(o:GetChildren()) do look(c) end
+                end
+                -- the real item list is a JSON string in Inventory.Inventory (and BankStorage): walk it for names the
+                -- game item table calls "Ship"
+                local function scanJson(valueName)
+                    local o = inv:FindFirstChild(valueName)
+                    if not o then return end
+                    local okj, t = pcall(function() return HttpService:JSONDecode(o.Value) end)
+                    if not okj then log("inventory: " .. valueName .. " is not JSON: " .. tostring(o.Value):sub(1, 120)) return end
+                    local seen = 0
+                    local function walk(x, key, depth)
+                        if depth > 4 then return end
+                        seen = seen + 1
+                        for _, nm in ipairs({ key, type(x) == "string" and x or nil }) do
+                            if type(nm) == "string" and okT and type(desc) == "table" and type(desc[nm]) == "table" and desc[nm].Type == "Ship" then
+                                ships[#ships + 1] = nm .. " (" .. valueName .. ")"
+                            end
+                        end
+                        if type(x) == "table" then for k, v in pairs(x) do walk(v, k, depth + 1) end end
+                    end
+                    walk(t, nil, 0)
+                    log("inventory: " .. valueName .. " JSON entries " .. seen)
+                end
+                scanJson("Inventory")
+                scanJson("BankStorage")
+                pass = #ships > 0
+                info = "equipped " .. tostring(eq and eq.Value) .. " | ships owned: " .. (#ships > 0 and table.concat(ships, ", ") or "none found") .. " | other entries " .. other
+            elseif piece == "deck" then
+                -- facts for boarding (t_8): top surface height along three lines over my ship (ray down from 80 above),
+                -- every 6 studs from 70 studs behind the driver seat to 30 in front of it
+                local ships = workspace:FindFirstChild("Ships")
+                local mine = ships and ships:FindFirstChild(LP.Name .. "Ship")
+                local seat = mine and mine:FindFirstChildWhichIsA("VehicleSeat", true)
+                if not seat then info = "no ship / seat" return end
+                local look = seat.CFrame.LookVector
+                look = Vector3.new(look.X, 0, look.Z).Unit
+                local right = Vector3.new(-look.Z, 0, look.X)
+                local rp = RaycastParams.new()
+                rp.FilterType = Enum.RaycastFilterType.Exclude
+                rp.FilterDescendantsInstances = { LP.Character }
+                local dy = tonumber(args) or 80
+                for _, off in ipairs({ 0, -7, 7, -14, 14 }) do
+                    local row = {}
+                    for k = -40, 60, 5 do
+                        local p = seat.Position + look * k + right * off
+                        local hit = workspace:Raycast(Vector3.new(p.X, seat.Position.Y + dy, p.Z), Vector3.new(0, -200, 0), rp)
+                        row[#row + 1] = k .. ":" .. (hit and (math.floor(hit.Position.Y) .. (hit.Instance:IsDescendantOf(mine) and "s" or "w")) or "-")
+                    end
+                    log("deck side " .. off .. " (along:height, s ship / w world): " .. table.concat(row, " "))
+                end
+                pass, info = true, string.format("seat %.0f,%.0f,%.0f look %.2f,%.2f", seat.Position.X, seat.Position.Y, seat.Position.Z, look.X, look.Z)
+            elseif piece == "sail" then
+                -- sea travel step 3 (t_6): drive like a player - hold W, tap A / D until the bow points at x z.
+                local x, z, sec = args:match("^(-?[%d%.]+)[%s,]+(-?[%d%.]+)%s*(%d*)")
+                if not x then info = "sail needs x z [sec]" return end
+                local goal = Vector3.new(tonumber(x), 0, tonumber(z))
+                sec = tonumber(sec) or 30
+                local h = C.hum()
+                local seat = h and h.SeatPart
+                if not seat or not seat:IsA("VehicleSeat") then info = "not in a driver seat (run test board first)" return end
+                local VIM = C.VIM
+                local K = Enum.KeyCode
+                local down = {}
+                local function set(k, on)
+                    if down[k] == on then return end
+                    down[k] = on
+                    pcall(function() VIM:SendKeyEvent(on, k, false, game) end)
+                end
+                local p0, t0 = seat.Position, os.clock()
+                local maxThr, maxSteer, errEnd = 0, 0, 0
+                while F.alive and F.running and os.clock() - t0 < sec and h.SeatPart == seat do
+                    local to = Vector3.new(goal.X - seat.Position.X, 0, goal.Z - seat.Position.Z)
+                    if to.Magnitude < 150 then break end
+                    local look = seat.CFrame.LookVector
+                    local right = Vector3.new(-look.Z, 0, look.X)
+                    local side, front = to.Unit:Dot(right), to.Unit:Dot(Vector3.new(look.X, 0, look.Z))
+                    errEnd = math.deg(math.atan2(side, front))
+                    set(K.W, true)
+                    set(K.D, errEnd > 6)
+                    set(K.A, errEnd < -6)
+                    maxThr = math.max(maxThr, math.abs(seat.Throttle))
+                    maxSteer = math.max(maxSteer, math.abs(seat.Steer))
+                    task.wait(0.1)
+                end
+                set(K.W, false) set(K.A, false) set(K.D, false)
+                local moved = (seat.Position - p0).Magnitude
+                local dt = os.clock() - t0
+                local left = (Vector3.new(goal.X - seat.Position.X, 0, goal.Z - seat.Position.Z)).Magnitude
+                pass = moved > 50 and h.SeatPart == seat
+                info = string.format("moved %.0f in %.0f s (%.1f /s) left %.0f | heading err %.0f deg | throttle seen %s steer seen %s | still seated %s | boat %.0f,%.0f,%.0f",
+                    moved, dt, moved / math.max(dt, 0.1), left, errEnd, tostring(maxThr), tostring(maxSteer), tostring(h.SeatPart == seat), seat.Position.X, seat.Position.Y, seat.Position.Z)
             elseif piece == "maze" then
                 pass, info = F.impel.testMaze(tonumber(args) or 240)
             elseif piece == "build" then
@@ -2893,13 +3490,34 @@ end
 -- pages (settings only - the farm logic is added per mode later)
 --------------------------------------------------------------------------------
 -- a row for something not built yet
-function UI.soon(card, text)
-    UI.info(card, text, function() return "soon" end)
-end
 -- risk word after the label, so it is readable without colours
 local function risk(text, level) return text .. "  [" .. level .. " risk]" end
 local function setIn(tbl) return function(name) F.cfg[tbl][name] = not F.cfg[tbl][name] or nil saveAll() end end
 local function isIn(tbl) return function(name) return F.cfg[tbl][name] == true end end
+
+-- h_3 (owner 2026-11-20: "make the window easier to understand"): a setting that no farm code reads yet is not
+-- drawn as a switch any more (it looked like it worked). Each card lists them in one grey line "Not built yet".
+-- List = cfg keys that no logic file reads (grep of src/*.lua on 2026-11-20); remove a key here once it is built.
+local NOT_BUILT = {}
+for k in ("autoBlock autoDodge autoRejoin bossHawk bossHop bossRadiant bossRoger evBaal evSpooks fishBait fishKeepLeg " ..
+    "fishMegalodon fishSell fishSpot freezeMobs groupMobs idBuy idDiff idKeep idRequeue idSecret idSolo lvlBlock lvlHaki " ..
+    "lvlMove normalHits normalSpeed pickUp safeSpot seaMegalodon seaSerpent seaSoulKing stayBehind stopOnKick stunLock"):gmatch("%S+") do
+    NOT_BUILT[k] = true
+end
+local KEYOF = setmetatable({}, { __mode = "k" })
+local cfgGet0 = cfgGet
+local function cfgGet(key) local f = cfgGet0(key) KEYOF[f] = key return f end
+local LATER = {}   -- card -> names not built
+local function later(card, text)
+    if not LATER[card] then LATER[card] = {} table.insert(LATER, card) end
+    table.insert(LATER[card], (text:gsub("%s+%[.-%]$", "")))
+end
+local toggle0, stepper0, choice0 = UI.toggle, UI.stepper, UI.choice
+local function built(get) local k = KEYOF[get] return not (k and NOT_BUILT[k]) end
+UI.toggle = function(card, text, get, ...) if built(get) then return toggle0(card, text, get, ...) end later(card, text) end
+UI.stepper = function(card, text, lo, hi, get, ...) if built(get) then return stepper0(card, text, lo, hi, get, ...) end later(card, text) end
+UI.choice = function(card, text, opts, get, ...) if built(get) then return choice0(card, text, opts, get, ...) end later(card, text) end
+function UI.soon(card, text) later(card, text) end
 
 -- Home
 local home = UI.page("Home", 1)
@@ -2931,6 +3549,7 @@ UI.button(run, "Close hub", "Close", function() if G.__gpo_hub_stop then G.__gpo
 local st = UI.card(home, 2, "Status")
 UI.info(st, "Now", function() return F.status end)
 UI.info(st, "Mode", function() return F.cfg.mode end)
+UI.info(st, "Modes that farm", function() return "Impel Down, Mobs, Boss, Level" end)
 UI.info(st, "Last action", function() return F.lastAction ~= "" and F.lastAction or "-" end)
 UI.info(st, "Version", function() return VERSION end)
 local acc = UI.card(home, 1, "Account")
@@ -2950,10 +3569,7 @@ end
 -- Combat (shared by every mode)
 local combat = UI.page("Combat", 2)
 local atk = UI.card(combat, 1, "Attack")
-UI.note(atk, "Use skills from")
-UI.pills(atk, { "Sword", "Fruit", "Gun", "Style" },
-    function(o) return F.cfg["use" .. o] == true end,
-    function(o) F.cfg["use" .. o] = not F.cfg["use" .. o] saveAll() end)
+later(atk, "Pick skill types (Sword / Fruit / Gun / Style)")
 UI.toggle(atk, "Normal hits between skills", cfgGet("normalHits"), cfgSet("normalHits"))
 UI.toggle(atk, "Group mobs before big skills", cfgGet("groupMobs"), cfgSet("groupMobs"))
 UI.toggle(atk, "Stun lock combo", cfgGet("stunLock"), cfgSet("stunLock"))
@@ -2965,7 +3581,8 @@ UI.toggle(def, "Stay behind target", cfgGet("stayBehind"), cfgSet("stayBehind"))
 UI.toggle(def, "Use safe spot if known", cfgGet("safeSpot"), cfgSet("safeSpot"))
 UI.stepper(def, "Retreat below HP %", 0, 90, cfgGet("retreatHp"), cfgSet("retreatHp"), 10)
 local rk = UI.card(combat, 2, "Risky - off by default")
-UI.toggle(rk, risk("Hover above target", "high"), cfgGet("hover"), cfgSet("hover"))
+UI.toggle(rk, risk("Hover above target (test)", "high"), cfgGet("hover"), cfgSet("hover"))
+UI.stepper(rk, "Hover height", 3, 12, cfgGet("hoverHeight"), cfgSet("hoverHeight"), 1)
 UI.toggle(rk, risk("Freeze mobs", "high"), cfgGet("freezeMobs"), cfgSet("freezeMobs"))
 UI.note(rk, "Only if the game allows it. Test on the new account first.")
 
@@ -3117,6 +3734,9 @@ UI.toggle(fa, "Pop-up when the game announces a fruit", cfgGet("fruitAlert"), cf
 UI.info(fa, "Last", function() return F.world and F.world.fruits[1] or "nothing yet" end)
 UI.info(fa, "Before", function() return F.world and F.world.fruits[2] or "-" end)
 
+
+for _, card in ipairs(LATER) do UI.note(card, "Not built yet: " .. table.concat(LATER[card], ", ")) end
+UI.toggle, UI.stepper, UI.choice = toggle0, stepper0, choice0
 
 -- small toggle button (the window's ... hides it, this brings it back)
 local tb = new("TextButton", { Name = "Toggle", Size = UDim2.fromOffset(52, 30), Position = UDim2.new(1, -260, 0, 120),
