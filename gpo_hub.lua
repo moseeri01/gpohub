@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "m_25"
+local VERSION = "m_26"
 
 -- Every thread the hub starts runs inside pcall. The game's anti-cheat listens to ScriptContext.Error and sends the
 -- text of errors from scripts that are not its own to the server (read in the decompiled "anti" module), so an
@@ -833,9 +833,25 @@ do
         local hr, h = m:FindFirstChild("HumanoidRootPart"), m:FindFirstChildOfClass("Humanoid")
         if not hr or not h then return end
         F.status = "Fighting " .. m.Name .. " (" .. math.floor(h.Health) .. " hp)"
+        -- Chase: a target that keeps moving (Vera, 20:50: 1 min without a hit, always 7-26 studs away) cannot be
+        -- caught with a path search per step. Close targets are followed directly, re-aimed every 0.15 s, for up to
+        -- 1.2 s per beat; only far ones use the path walk.
         local r = C.root()
-        if r and (hr.Position - r.Position).Magnitude > ATK.reach + 1 then
+        local d0 = r and (hr.Position - r.Position).Magnitude or 999
+        if d0 > 45 then
             C.walkTo(hr.Position, ATK.reach, 4, function() return h.Health <= 0 end)
+        elseif d0 > ATK.reach + 1 then
+            local hm = C.hum()
+            C.noSit(true)
+            local t0 = os.clock()
+            while hm and F.alive and F.running and h.Health > 0 and os.clock() - t0 < 1.2 do
+                r = C.root()
+                if not r or (hr.Position - r.Position).Magnitude <= ATK.reach then break end
+                hm:MoveTo(hr.Position)
+                if F.cfg.sprint and (hr.Position - r.Position).Magnitude > 15 then C.sprint(true) end
+                task.wait(0.15)
+            end
+            C.noSit(false)
         end
         r = C.root()
         local dist = r and (hr.Position - r.Position).Magnitude or 999
