@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "g_2"
+local VERSION = "g_3"
 
 -- Every thread the hub starts runs inside pcall. The game's anti-cheat listens to ScriptContext.Error and sends the
 -- text of errors from scripts that are not its own to the server (read in the decompiled "anti" module), so an
@@ -945,6 +945,22 @@ do
     local ID = { PLACE = 11424731604, WORLD = 7465136166, PAD = Vector3.new(5876, 9.6, -10213),prompts = {}, stage = "-", done = { chests = 0, loot = 0, keys = 0 } }
     F.impel = ID
     local JUNK = { ["Wooden Plank"] = true }
+    -- The stage text comes only as an event; a hub that reloads in the middle of a run (remote reload, crash)
+    -- had stage "-" and stood still ("Nothing near", 21:08). It is kept per server in gpohub/impel_stage.json.
+    local STAGEFILE = FOLDER .. "/impel_stage.json"
+    function ID.saveStage()
+        if not canFiles then return end
+        pcall(function() writefile(STAGEFILE, HttpService:JSONEncode({ job = game.JobId, stage = ID.stage, deaths = ID.deaths or 0 })) end)
+    end
+    pcall(function()
+        if canFiles and isfile(STAGEFILE) then
+            local d = HttpService:JSONDecode(readfile(STAGEFILE))
+            if type(d) == "table" and d.job == game.JobId and type(d.stage) == "string" then
+                ID.stage = d.stage
+                ID.deaths = tonumber(d.deaths) or 0
+            end
+        end
+    end)
     function ID.inRaid() return game.PlaceId == ID.PLACE end
 
     task.spawn(function()
@@ -954,6 +970,7 @@ do
             if kind == "waveInfo" and type(text) == "string" then
                 text = text:gsub("<[^>]+>", "")   -- some texts carry <font> tags
                 ID.stage = text
+                ID.saveStage()
                 log("impel stage: " .. text .. " (" .. tostring(mode) .. ")")
             end
         end)
@@ -1219,8 +1236,27 @@ do
             return
         end
         -- low HP: stop walking into fights (loot and chests go on); no safe spot is known yet, so it does not run away
+        -- Low HP used to mean "do not fight, go on looting" - next to three guards that is death (21:07: 867 -> 12 hp
+        -- while walking to a chest; one life lost). Now: walk away from the nearest enemy and wait until HP is back
+        -- over 70 % (the game regenerates HP out of combat).
         local low = C.hpPct() < F.cfg.retreatHp
-        if low then F.status = "Low HP - not fighting (Combat: Retreat below HP)" end
+        if ID.backing and C.hpPct() >= 70 then ID.backing = false log("impel: HP back, going on") end
+        if low and not ID.backing then ID.backing = true log(string.format("impel: low HP (%.0f %%) - backing off", C.hpPct())) end
+        if ID.backing then
+            local r = C.root()
+            local g = C.nearestMob(120, function() return true end)
+            if r and g then
+                local away = r.Position - g.HumanoidRootPart.Position
+                away = Vector3.new(away.X, 0, away.Z)
+                if away.Magnitude < 1 then away = Vector3.new(0, 0, 1) end
+                F.status = string.format("Low HP (%.0f %%) - backing away from %s", C.hpPct(), g.Name)
+                C.walkTo(r.Position + away.Unit * 60, 8, 6)
+            else
+                F.status = string.format("Low HP (%.0f %%) - waiting to heal", C.hpPct())
+                task.wait(1)
+            end
+            return
+        end
         if F.cfg.idFight and not low then
             local g = C.nearestMob(F.cfg.idFightRange, isGuard)
             if g then C.attack(g, F.cfg.idSkills) return end
