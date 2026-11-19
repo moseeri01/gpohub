@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "id_3"
+local VERSION = "s_1"
 
 local F = {
     alive = true,
@@ -633,6 +633,7 @@ do
         if not ev or not F.alive then return end
         F.conns[#F.conns + 1] = ev.OnClientEvent:Connect(function(kind, text, _, mode)
             if kind == "waveInfo" and type(text) == "string" then
+                text = text:gsub("<[^>]+>", "")   -- some texts carry <font> tags
                 ID.stage = text
                 log("impel stage: " .. text .. " (" .. tostring(mode) .. ")")
             end
@@ -718,6 +719,121 @@ do
         end
     end)
 end
+--------------------------------------------------------------------------------
+-- session (s_1, 2026-11-19): counters read from what the server already sends us (listen only), plus two helpers.
+--   drops  : ReplicatedStorage.Events.note("New Item <Rare=Epic><Name>")              (recorded)
+--   floors : ReplicatedStorage.matchEvents("waveInfo", text, nil, "ImpelDown")        (recorded)
+--   haki   : note "You have unlocked BUSO, press J to activate!" comes after each spawn -> press J (only while Start is on)
+--   stop   : Home "Stop after (hours)" turns Start off. Start is never saved, so the clock restarts in every place.
+-- Counters for today are kept in gpohub/session.json because the hub reloads on every teleport.
+--------------------------------------------------------------------------------
+do
+    local S = { drops = {}, rare = {}, raids = 0, day = os.date("%Y-%m-%d"), floor = "-", bosses = 0, areas = 0, raidT = nil, startT = nil, lastJob = nil }
+    F.session = S
+    local RS = game:GetService("ReplicatedStorage")
+    local FILE = FOLDER .. "/session.json"
+    local ORDER = { "Mythical", "Legendary", "Epic", "Rare", "Uncommon", "Common" }
+
+    local function save()
+        if not canFiles then return end
+        ensureFolder()
+        pcall(function()
+            writefile(FILE, HttpService:JSONEncode({ day = S.day, raids = S.raids, drops = S.drops, rare = S.rare, lastJob = S.lastJob }))
+        end)
+    end
+    pcall(function()
+        if not (canFiles and isfile(FILE)) then return end
+        local d = HttpService:JSONDecode(readfile(FILE))
+        if type(d) ~= "table" or d.day ~= S.day then return end
+        S.raids = tonumber(d.raids) or 0
+        if type(d.drops) == "table" then S.drops = d.drops end
+        if type(d.rare) == "table" then S.rare = d.rare end
+        S.lastJob = d.lastJob
+    end)
+    -- one raid = one server (JobId) of the Impel Down place
+    if F.impel.inRaid() then
+        S.raidT = os.clock()
+        if S.lastJob ~= game.JobId then
+            S.raids = S.raids + 1
+            S.lastJob = game.JobId
+            save()
+        end
+    end
+
+    function S.raidLine()
+        if not S.raidT then return "not in a raid" end
+        local t = math.floor(os.clock() - S.raidT)
+        return string.format("%d:%02d  floor %s  bosses %d", math.floor(t / 60), t % 60, S.floor, S.bosses)
+    end
+    function S.rareLine()
+        local out = {}
+        for _, r in ipairs(ORDER) do
+            if S.rare[r] then out[#out + 1] = r .. " " .. S.rare[r] end
+        end
+        return #out > 0 and table.concat(out, ", ") or "none yet"
+    end
+
+    local lastHaki = 0
+    local function onNote(text)
+        if type(text) ~= "string" then return end
+        local rar, name = text:match("New Item <Rare=(%a+)><(.+)>")
+        if rar and name then
+            S.rare[rar] = (S.rare[rar] or 0) + 1
+            if name ~= "Wooden Plank" then
+                table.insert(S.drops, 1, os.date("%H:%M ") .. name .. " (" .. rar .. ")")
+                while #S.drops > 30 do table.remove(S.drops) end
+            end
+            log("drop: " .. name .. " (" .. rar .. ")")
+            save()
+            return
+        end
+        if text:find("press J to activate", 1, true) and F.running and F.cfg.useHaki and os.clock() - lastHaki > 15 then
+            lastHaki = os.clock()
+            task.delay(1.5, function()
+                if F.alive and F.running then
+                    C.key(Enum.KeyCode.J)
+                    log("haki: pressed J")
+                end
+            end)
+        end
+    end
+    task.spawn(function()
+        local evs = RS:WaitForChild("Events", 30)
+        local note = evs and evs:WaitForChild("note", 30)
+        if note and F.alive and note:IsA("RemoteEvent") then
+            F.conns[#F.conns + 1] = note.OnClientEvent:Connect(function(text) pcall(onNote, text) end)
+        end
+    end)
+    task.spawn(function()
+        local ev = RS:WaitForChild("matchEvents", 30)
+        if not ev or not F.alive or not ev:IsA("RemoteEvent") then return end
+        F.conns[#F.conns + 1] = ev.OnClientEvent:Connect(function(kind, text)
+            if kind ~= "waveInfo" or type(text) ~= "string" then return end
+            local plain = text:gsub("<[^>]+>", "")
+            local fl = plain:match("FLOOR%s+(%d+)")
+            if fl then S.floor = fl end
+            if plain:find("BOSS DEFEATED", 1, true) then S.bosses = S.bosses + 1 end
+            if plain:find("CLEARED", 1, true) then S.areas = S.areas + 1 end
+        end)
+    end)
+
+    task.spawn(function()
+        while F.alive do
+            if F.running then
+                S.startT = S.startT or os.clock()
+                if os.clock() - S.startT > F.cfg.stopHours * 3600 then
+                    F.running = false
+                    F.status = "Stopped: ran " .. F.cfg.stopHours .. " h (Home: Stop after)"
+                    log("stop: time limit")
+                end
+            else
+                S.startT = nil
+            end
+            task.wait(2)
+        end
+    end)
+end
+
 
 --------------------------------------------------------------------------------
 -- open-world parts that need no recorded remote calls (2026-11-19):
@@ -893,8 +1009,12 @@ local acc = UI.card(home, 1, "Account")
 UI.info(acc, "Player", function() return LP and LP.Name or "-" end)
 UI.soon(acc, "Level / Peli")
 local dr = UI.card(home, 2, "Session")
-UI.soon(dr, "Runs / time per run")
-UI.soon(dr, "Drops")
+UI.info(dr, "Raids today", function() return tostring(F.session.raids) end)
+UI.info(dr, "This raid", function() return F.session.raidLine() end)
+UI.info(dr, "Drops today", function() return F.session.rareLine() end)
+for i = 1, 3 do
+    UI.info(dr, i == 1 and "Last drops" or "", function() return F.session.drops[i] or "-" end)
+end
 
 -- Combat (shared by every mode)
 local combat = UI.page("Combat", 2)
