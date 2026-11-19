@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "m_9"
+local VERSION = "m_10"
 
 local F = {
     alive = true,
@@ -511,6 +511,55 @@ do
         return r ~= nil and (r.Position - pos).Magnitude <= near + 2
     end
 
+    -- straight walk to a point, no path search; jumps when it stops moving (steps, ledges)
+    function C.walkStraight(pos, near, limit)
+        local t0, lastPos, stuck = os.clock(), nil, 0
+        while F.alive and F.running and C.alive() do
+            local h, r = C.hum(), C.root()
+            if not h or not r then return false end
+            local flat = Vector3.new(pos.X, r.Position.Y, pos.Z)
+            if (r.Position - flat).Magnitude <= (near or 4) then return true end
+            if os.clock() - t0 > (limit or 12) then return false end
+            h:MoveTo(pos)
+            if C.wantSprint then C.sprint(true) end
+            task.wait(0.2)
+            if lastPos and (r.Position - lastPos).Magnitude < 0.4 then
+                stuck = stuck + 1
+                if stuck % 3 == 0 then h.Jump = true end
+                if stuck >= 20 then return false end
+            else stuck = 0 end
+            lastPos = r.Position
+        end
+        return false
+    end
+    -- follow a recorded hand route (list of Vector3): start at the route point nearest to us, then on to the end
+    function C.followRoute(points, near)
+        local r = C.root()
+        if not r then return false end
+        local first, bestD = 1, math.huge
+        for i, p in ipairs(points) do
+            local d = (p - r.Position).Magnitude
+            if d < bestD then first, bestD = i, d end
+        end
+        if first < #points then first = first + 1 end   -- the nearest point may be behind us
+        C.wantSprint = F.cfg.sprint and true or false
+        local ok = true
+        for i = first, #points do
+            if not C.walkStraight(points[i], i == #points and (near or 4) or 6, 14) then
+                ok = false
+                local rr = C.root()
+                if os.clock() - (C.failAt or 0) > 3 and rr then
+                    C.failAt = os.clock()
+                    log(string.format("route: stuck before point %d of %d @ %.0f,%.0f,%.0f", i, #points, rr.Position.X, rr.Position.Y, rr.Position.Z))
+                end
+                break
+            end
+        end
+        C.wantSprint = false
+        C.sprint(false)
+        return ok
+    end
+
     function C.key(k, hold)
         if not VIM then return end
         pcall(function()
@@ -786,6 +835,14 @@ do
     end
     -- other enemies recorded in the raid: Blugori, Kelvin, Santa, Kramprus, Snow Wolf (bosses / event) - only with the switch
     ID.KEYSPOT = Vector3.new(3026.3, 2075.9, -13411.0)
+    -- hand route from the Impel Base spawn to the raid pad (recorded 17:45, Af_terdark)
+    ID.PADROUTE = {
+        Vector3.new(5913.8, 5.4, -9792.2), Vector3.new(5914.7, 5.4, -9817.8), Vector3.new(5916.3, 5.4, -9860.5), Vector3.new(5917.3, 5.4, -9886.0),
+        Vector3.new(5918.2, 5.3, -9911.2), Vector3.new(5919.2, 5.3, -9937.7), Vector3.new(5920.8, 5.3, -9980.3), Vector3.new(5921.8, 6.3, -10006.1),
+        Vector3.new(5926.5, 9.8, -10029.9), Vector3.new(5931.9, 8.3, -10053.5), Vector3.new(5941.2, 8.3, -10076.3), Vector3.new(5942.2, 8.3, -10101.9),
+        Vector3.new(5954.1, 5.3, -10122.4), Vector3.new(5956.6, 9.6, -10142.6), Vector3.new(5939.3, 9.6, -10161.3), Vector3.new(5906.0, 9.6, -10188.2),
+        Vector3.new(5887.8, 9.6, -10206.2), Vector3.new(5878.7, 9.6, -10215.6), Vector3.new(5876.0, 9.6, -10213.0),
+    }
     -- a pressed prompt is left alone for 8 s (m_2 pressed the same chest several times) and counted once
     ID.pressed = setmetatable({}, { __mode = "k" })
     local function use(p, what, counter)
@@ -959,7 +1016,16 @@ do
                     else
                         F.status = "Walking to the raid pad (" .. math.floor(d) .. ")"
                         if not ID.padLogged then ID.padLogged = true log("impel: walking to the raid pad, " .. math.floor(d) .. " away") end
-                        pcall(C.walkTo, ID.PAD, 4, 40)
+                        -- near the recorded route: follow it (path search got stuck on a step 244 away, m_8 log)
+                        local nearRoute = false
+                        for _, p in ipairs(ID.PADROUTE) do
+                            if (p - r.Position).Magnitude < 60 then nearRoute = true break end
+                        end
+                        if nearRoute then
+                            pcall(C.followRoute, ID.PADROUTE, 4)
+                        else
+                            pcall(C.walkTo, ID.PADROUTE[1], 8, 40)
+                        end
                     end
                 elseif C.alive() then
                     local ok, err = pcall(step)
