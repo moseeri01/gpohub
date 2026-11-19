@@ -25,7 +25,7 @@ while not LP do task.wait(0.2) LP = Players.LocalPlayer end
 task.wait(0.3)
 if G.__gpo_hub_seq ~= MY_SEQ then return end
 local FOLDER = "gpohub"
-local VERSION = "k_3"
+local VERSION = "k_4"
 
 -- Exact build. GitHub serves the main file from a cache for about 5 minutes, so a hub loaded right after a push
 -- can be an older build. gpohub/want.txt (written at push time on this PC) names the commit to run; a hub that
@@ -1327,7 +1327,7 @@ do
     -- x = 2540.1 + 75i, z = -14214 - 75j, and "END OF MAZE REACHED" came at 2990,-15281. Owner: walls change every
     -- run, the way out stays. So: search as we go - at each grid point rays tell which of the 4 neighbours are
     -- open, take the unvisited one nearest the exit, back up at dead ends. Walking only (server checks noclip / fly).
-    local MZ = { X0 = 2540.1, Z0 = -14214, STEP = 75, exit = Vector3.new(2990.1, 2075.7, -15281),
+    local MZ = { X0 = 2540.1, Z0 = -14214, STEP = 75, exit = Vector3.new(2990.1, 2075.7, -15281), entry = Vector3.new(2976, 2076, -14034),
         visited = {}, bad = {}, stack = {}, hops = 0, fails = 0, gaveUp = false }
     ID.maze = MZ
     local DIRS = { { 0, 1 }, { 1, 0 }, { -1, 0 }, { 0, -1 } }   -- +j runs toward the exit (-Z)
@@ -1373,6 +1373,16 @@ do
             return
         end
         local y = r.Position.Y
+        -- First real maze run (23:27, old build): the search started in the wave area north of the maze, wandered
+        -- back into the start room (grid rows -6 .. -11) and ran out. The hand route enters the maze at about
+        -- 2976,-14034 and then goes east along z -14050. So: walk to that entry first, and never search north of
+        -- row -2 or outside columns -1 .. 14.
+        if r.Position.Z > -14015 then
+            F.status = "Maze: walking to the entrance"
+            if not MZ.entryLogged then MZ.entryLogged = true log("maze: walking to the entrance 2976,-14034") end
+            C.walkTo(MZ.entry, 6, 25, function() return C.nearestMob(30, isGuard) ~= nil end)
+            return
+        end
         local i, j = nodeOf(r.Position)
         local k = nkey(i, j)
         local here = nodePos(i, j, y)
@@ -1398,7 +1408,7 @@ do
             local ni, nj = i + d[1], j + d[2]
             local nk = nkey(ni, nj)
             local np = nodePos(ni, nj, y)
-            if not MZ.bad[k .. ">" .. nk] and clear(r.Position, np) then
+            if nj >= -2 and nj <= 15 and ni >= -1 and ni <= 14 and not MZ.bad[k .. ">" .. nk] and clear(r.Position, np) then
                 openTxt = openTxt .. " " .. nk
                 if not MZ.visited[nk] then
                     local dist = math.abs(ni - ei) + math.abs(nj - ej)
