@@ -16,7 +16,7 @@ if not game:IsLoaded() then pcall(function() game.Loaded:Wait() end) end
 local LP = Players.LocalPlayer
 while not LP do task.wait(0.2) LP = Players.LocalPlayer end
 local FOLDER = "gpohub"
-local VERSION = "sh_3"
+local VERSION = "r_1"
 
 -- Every thread the hub starts runs inside pcall. The game's anti-cheat listens to ScriptContext.Error and sends the
 -- text of errors from scripts that are not its own to the server (read in the decompiled "anti" module), so an
@@ -1801,7 +1801,9 @@ do
         while F.alive do
             task.wait(2)
             local sp = tonumber(S.stat("SkillPoints")) or 0
-            if F.running and F.cfg.idStats and F.impel.inRaid() and sp > 0 and fails < 4 then
+            -- only the raid's own points: the opening fight (Vera) still runs on the real account, whose few free
+            -- points must not be spent. The raid's pool is ~1125 and arrives with floor 1 (stage text known).
+            if F.running and F.cfg.idStats and F.impel.inRaid() and sp >= 200 and F.impel.stage ~= "-" and fails < 4 then
                 local ev = RS:FindFirstChild("Events")
                 ev = ev and ev:FindFirstChild("stats")
                 if ev and ev:IsA("RemoteEvent") then
