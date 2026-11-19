@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "m_11"
+local VERSION = "m_12"
 
 local F = {
     alive = true,
@@ -501,7 +501,7 @@ do
                 task.wait(0.25)
                 if (r.Position - lastPos).Magnitude < 0.5 then
                     stuck = stuck + 1
-                    if stuck == 6 then h.Jump = true end
+                    if stuck >= 3 then C.jump() end
                     if stuck >= 12 then return fail("not moving for 3 s") end
                 else stuck = 0 end
                 lastPos = r.Position
@@ -511,6 +511,25 @@ do
         return r ~= nil and (r.Position - pos).Magnitude <= near + 2
     end
 
+    -- jump the way a player does: the game's Movements script owns jumping (it switches JumpPower between 0 and
+    -- 50 and allows one jump a second), so Humanoid.Jump = true is ignored most of the time. A Space key press
+    -- goes through that script.
+    function C.jump()
+        if os.clock() - (C.jumpAt or 0) < 1.15 then return end
+        C.jumpAt = os.clock()
+        if VIM then
+            task.spawn(function()
+                pcall(function()
+                    VIM:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
+                    task.wait(0.08)
+                    VIM:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
+                end)
+            end)
+        else
+            local h = C.hum()
+            if h then h.Jump = true end
+        end
+    end
     -- straight walk to a point, no path search; jumps when it stops moving (steps, ledges)
     function C.walkStraight(pos, near, limit)
         local t0, lastPos, stuck = os.clock(), nil, 0
@@ -525,8 +544,8 @@ do
             task.wait(0.2)
             if lastPos and (r.Position - lastPos).Magnitude < 0.4 then
                 stuck = stuck + 1
-                if stuck % 3 == 0 then h.Jump = true end
-                if stuck >= 20 then return false end
+                if stuck >= 2 then C.jump() end
+                if stuck >= 30 then return false end
             else stuck = 0 end
             lastPos = r.Position
         end
