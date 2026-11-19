@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "air_1"
+local VERSION = "air_2"
 
 -- Every thread the hub starts runs inside pcall. The game's anti-cheat listens to ScriptContext.Error and sends the
 -- text of errors from scripts that are not its own to the server (read in the decompiled "anti" module), so an
@@ -571,6 +571,16 @@ do
     -- cooldown, no count limit outside combat) pushes 50 studs/s along Humanoid.MoveDirection plus 25 up. Under
     -- MoveTo the MoveDirection read 0, so Geppo only went up; with W held (key walk) it goes forward. So: aim the
     -- camera at the target, hold W, jump, and Geppo again whenever we are in the air. Measures what it did.
+    -- current / max stamina, read from the game's own HUD label (PlayerGui.HUD.Main.Bars.Stamina.Detail.Progress "a / b")
+    function C.stamina()
+        local cur, max = nil, nil
+        pcall(function()
+            local t = LP.PlayerGui.HUD.Main.Bars.Stamina.Detail.Progress.Text
+            local a, b = t:match("([%d%.]+)%s*/%s*([%d%.]+)")
+            cur, max = tonumber(a), tonumber(b)
+        end)
+        return cur, max
+    end
     function C.airTo(pos, limit, floorY)
         local h, r = C.hum(), C.root()
         local cam = workspace.CurrentCamera
@@ -578,6 +588,7 @@ do
         local function flat(a, b) return Vector3.new(a.X - b.X, 0, a.Z - b.Z).Magnitude end
         local function press(down) pcall(function() VIM:SendKeyEvent(down, Enum.KeyCode.W, false, game) end) end
         local start, t0, uses, lowest = r.Position, os.clock(), 0, r.Position.Y
+        local stam0 = C.stamina()
         local oldType = cam.CameraType
         C.noSit(true)
         local conn = game:GetService("RunService").RenderStepped:Connect(function()
@@ -602,6 +613,8 @@ do
                 if flat(rr.Position, pos) <= 15 then done = true why = "arrived" return end
                 if os.clock() - t0 > (limit or 30) then return end
                 if floorY and rr.Position.Y < floorY then why = "too low" return end
+                local sc, sm = C.stamina()
+                if sc and sm and sc < sm * 0.12 then why = "stamina low" return end
                 if hh:GetState() == Enum.HumanoidStateType.Swimming then why = "in water" return end
                 if hh.FloorMaterial == Enum.Material.Air then
                     if C.geppo() then uses = uses + 1 end
@@ -621,7 +634,9 @@ do
         local rr = C.root()
         local dist = rr and flat(rr.Position, start) or 0
         local dt = os.clock() - t0
-        log(string.format("air: %s | %.0f studs in %.1f s (%.1f /s) | %d geppo | lowest y %.0f | now y %.0f", why, dist, dt, dist / math.max(dt, 0.1), uses, lowest, rr and rr.Position.Y or 0))
+        local stam1, stamMax = C.stamina()
+        log(string.format("air: %s | %.0f studs in %.1f s (%.1f /s) | %d geppo | stamina %s -> %s of %s | lowest y %.0f | now y %.0f", why, dist, dt,
+            dist / math.max(dt, 0.1), uses, tostring(stam0), tostring(stam1), tostring(stamMax), lowest, rr and rr.Position.Y or 0))
         return done
     end
     function C.walkInner(pos, near, limit, stop)
@@ -2560,7 +2575,7 @@ do
             floor = h and tostring(h.FloorMaterial) or nil, sprint = c and c:GetAttribute("MovementSprintActive") or false,
             combat = c and c:FindFirstChild("inCombat") ~= nil or false, tool = c and c:FindFirstChildOfClass("Tool") and c:FindFirstChildOfClass("Tool").Name or nil,
             atk = a and { method = a.names[a.method], proven = a.proven, swings = a.swings, reach = a.reach, can = tostring(a.can) } or nil,
-            goal = R.goal and { R.goal.X, R.goal.Y, R.goal.Z } or nil, mobs = mobs,
+            goal = R.goal and { R.goal.X, R.goal.Y, R.goal.Z } or nil, mobs = mobs, stam = { C.stamina() },
             level = F.level and { step = F.level.line(1), target = F.level.line(2), now = F.level.line(3), took = F.level.took, kills = F.level.kills } or nil,
             acct = { lv = F.session.stat("Level"), sp = F.session.stat("SkillPoints"), str = F.session.stat("Strength"), def = F.session.stat("Defense"),
                 stam = F.session.stat("Stamina"), swd = F.session.stat("SwordMastery"), gun = F.session.stat("GunMastery"), df = F.session.stat("DevilFruitMastery"),
