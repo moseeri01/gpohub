@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "g_1"
+local VERSION = "g_2"
 
 -- Every thread the hub starts runs inside pcall. The game's anti-cheat listens to ScriptContext.Error and sends the
 -- text of errors from scripts that are not its own to the server (read in the decompiled "anti" module), so an
@@ -1001,7 +1001,8 @@ do
         if not toolDesc then return true, nil, 0 end
         if type(info) ~= "table" then return ID.kit.unknown < 3, "?", 0 end
         local ty, rk = tostring(info.Type), RANK[tostring(info.Rare)] or 1
-        if WEAPON[ty] or WEAR[ty] then return rk > (ID.kit.slots[ty] or 0), ty, rk end
+        -- fruits ARE in the table (Type "Fruit", e.g. "Spring") - g_1 skipped them as junk
+        if WEAPON[ty] or WEAR[ty] or ty == "Fruit" then return rk > (ID.kit.slots[ty] or 0), ty, rk end
         if ty == "Drink" then return ID.kit.drinks < 6, ty, rk end
         if KEEP[ty] then return (ID.kit.slots[name] or 0) < 1, name, 1 end
         return false, ty, rk
@@ -1011,13 +1012,13 @@ do
         local weapon = math.max(s.Katana or 0, s.Katana2 or 0, s.Gun or 0)
         local wear = 0
         for ty in pairs(WEAR) do if s[ty] then wear = wear + 1 end end
-        return weapon >= 3 and wear >= 4 and ID.kit.unknown >= 1
+        return weapon >= 3 and wear >= 4 and ((s.Fruit or 0) >= 1 or ID.kit.unknown >= 1)
     end
     function ID.kitLine()
         local s = ID.kit.slots
         local wear = 0
         for ty in pairs(WEAR) do if s[ty] then wear = wear + 1 end end
-        return string.format("weapon %d  wear %d  fruit? %d  drinks %d", math.max(s.Katana or 0, s.Katana2 or 0, s.Gun or 0), wear, ID.kit.unknown, ID.kit.drinks)
+        return string.format("weapon %d  wear %d  fruit %d  drinks %d", math.max(s.Katana or 0, s.Katana2 or 0, s.Gun or 0), wear, s.Fruit or 0, ID.kit.drinks)
     end
     local function took(name)
         local ok, slot, rk = judge(name)
