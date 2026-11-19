@@ -25,7 +25,7 @@ while not LP do task.wait(0.2) LP = Players.LocalPlayer end
 task.wait(0.3)
 if G.__gpo_hub_seq ~= MY_SEQ then return end
 local FOLDER = "gpohub"
-local VERSION = "k_4"
+local VERSION = "t_1"
 
 -- Exact build. GitHub serves the main file from a cache for about 5 minutes, so a hub loaded right after a push
 -- can be an older build. gpohub/want.txt (written at push time on this PC) names the commit to run; a hub that
@@ -33,7 +33,8 @@ local VERSION = "k_4"
 do
     local okw, want = pcall(function() return isfile and isfile(FOLDER .. "/want.txt") and readfile(FOLDER .. "/want.txt") or nil end)
     want = okw and type(want) == "string" and want:match("^%s*([0-9a-f]+)%s*$") or nil
-    if want and #want >= 7 and G.__gpo_hub_commit ~= want then
+    -- G.__gpo_hub_dev: this session runs the local test build (remote command "dev"), never redirect it
+    if want and #want >= 7 and G.__gpo_hub_commit ~= want and not G.__gpo_hub_dev then
         G.__gpo_hub_commit = want
         local okd, src = pcall(function() return game:HttpGet("https://raw.githubusercontent.com/moseeri01/gpohub/" .. want .. "/gpo_hub.lua") end)
         local fn = okd and type(src) == "string" and #src > 1000 and loadstring(src) or nil
@@ -105,9 +106,13 @@ local function ensureFolder()
     end
 end
 local logLines = {}
+F.recent = {}        -- last few log messages (for the SNAP line, remote.lua)
 local function log(msg)
     F.lastAction = os.date("%H:%M:%S ") .. tostring(msg)
     logLines[#logLines + 1] = F.lastAction
+    F.recent[#F.recent + 1] = tostring(msg):sub(1, 60)
+    if #F.recent > 4 then table.remove(F.recent, 1) end
+    if F.onLog then pcall(F.onLog, tostring(msg)) end
 end
 local function saveAll()
     if not canFiles then return end
@@ -1439,6 +1444,41 @@ do
         C.walkTo(nodePos(tonumber(pi), tonumber(pj), y), 4, 15)
     end
 
+    -- piece tests (remote "test chest|drop|maze", t_1): one action where the character stands
+    function ID.testUse(kind)
+        local p = nearestPrompt(kind, 300)
+        if not p then return false, "no " .. kind .. " prompt within 300" end
+        local name = tostring(p.ObjectText)
+        local pp, r = C.promptPos(p), C.root()
+        local d0 = (pp and r) and (pp - r.Position).Magnitude or -1
+        local ok = C.usePrompt(p, kind, nil)
+        task.wait(1)
+        local gone = not (p.Parent and p.Enabled)
+        return (ok and gone) and true or false, string.format("%s dist %.0f pressed %s gone %s", name, d0, tostring(ok), tostring(gone))
+    end
+    function ID.testMaze(sec)
+        local r = C.root()
+        if not r then return false, "no character" end
+        MZ.gaveUp = false
+        MZ.fails = 0
+        local i0, j0 = nodeOf(r.Position)
+        local t0 = os.clock()
+        local function exitLeft()
+            local rr = C.root()
+            return rr and (Vector3.new(rr.Position.X, 0, rr.Position.Z) - Vector3.new(MZ.exit.X, 0, MZ.exit.Z)).Magnitude or -1
+        end
+        while F.alive and F.running and C.alive() and not MZ.gaveUp and os.clock() - t0 < sec do
+            local l = exitLeft()
+            if l >= 0 and l < 40 then break end
+            mazeStep()
+            task.wait(0.1)
+        end
+        r = C.root()
+        local i1, j1 = nodeOf(r and r.Position or MZ.exit)
+        local left = exitLeft()
+        return left >= 0 and left < 40, string.format("from %d,%d to %d,%d exit %.0f away gaveUp %s in %.0f s", i0, j0, i1, j1, left, tostring(MZ.gaveUp), os.clock() - t0)
+    end
+
     local function step()
         local c = C.char()
         if c and c:FindFirstChild("Cuffed") and F.cfg.idCuffs then
@@ -1832,6 +1872,17 @@ do
         end
     end)
 
+    -- dry run of the raid build for the remote "test build": prints the plan, spends nothing
+    function S.buildPlan()
+        local sp = tonumber(S.stat("SkillPoints")) or 0
+        local c = LP.Character
+        local tool = c and c:FindFirstChildOfClass("Tool")
+        local weapon = (tool and tool:GetAttribute("devilFruit")) and "DevilFruitMastery" or "SwordMastery"
+        return string.format("sp %d inRaid %s stage %s would-spend %s -> %s %d Defense %d Stamina %d (now Swd %s Def %s Stam %s DF %s) held %s",
+            sp, tostring(F.impel.inRaid()), tostring(F.impel.stage), tostring(F.impel.inRaid() and sp >= 200 and F.impel.stage ~= "-"),
+            weapon, math.floor(sp * 0.5), math.floor(sp * 0.35), math.floor(sp * 0.15),
+            tostring(S.stat("SwordMastery")), tostring(S.stat("Defense")), tostring(S.stat("Stamina")), tostring(S.stat("DevilFruitMastery")), tool and tool.Name or "none")
+    end
     -- Raid build (g_6). Inside Impel Down the character starts with base stats (Str 100, Def 250, Stam 250) and
     -- about 1125 free points; the game even shows "spend your skill points to get stronger" (screen 21:15). The hub
     -- never spent them and died twice to the first guard wave. These points belong to the raid only (the game
@@ -2571,6 +2622,16 @@ do
                 F.running = true
                 log("remote: goto " .. rest)
             end
+        elseif cmd == "dev" then
+            -- fast test round (loop v2): load the build that build.ps1 copied to gpohub/dev.lua, in this session.
+            -- The new copy stops this one first (G.__gpo_hub_stop: loops end, connections cut, window destroyed).
+            local ok, src = pcall(function() return readfile(FOLDER .. "/dev.lua") end)
+            local fn = ok and type(src) == "string" and #src > 1000 and loadstring(src) or nil
+            log("remote: dev load " .. (fn and "ok" or "FAILED"))
+            if fn then G.__gpo_hub_dev = true task.spawn(fn) end
+        elseif cmd == "test" then
+            local piece, args = rest:match("^(%S+)%s*(.-)$")
+            task.spawn(function() R.test(piece or "", args or "") end)
         elseif cmd == "reload" then
             -- "reload <commit>" loads that exact commit of the public repo: the plain main URL is cached by GitHub
             -- for about 5 minutes (a ?t= suffix does not skip it - seen 20:26, m_15 came back after m_16 was pushed)
@@ -2585,6 +2646,116 @@ do
         else
             log("remote: unknown command " .. line:sub(1, 60))
         end
+    end
+
+    -- SNAP: one line with everything needed to see why something went wrong (loop v2). At most one per 10 s.
+    local lastSnap = 0
+    local function heldName()
+        local c = LP.Character
+        local t = c and c:FindFirstChildOfClass("Tool")
+        return t and t.Name or "none"
+    end
+    function R.snap(reason)
+        if os.clock() - lastSnap < 10 then return end
+        lastSnap = os.clock()
+        local r, h = C.root(), C.hum()
+        local near = {}
+        local npcs = workspace:FindFirstChild("NPCs")
+        if npcs and r then
+            for _, m in ipairs(npcs:GetChildren()) do
+                local hr, mh = m:FindFirstChild("HumanoidRootPart"), m:FindFirstChildOfClass("Humanoid")
+                if hr and mh and mh.Health > 0 and (hr.Position - r.Position).Magnitude < 30 and #near < 5 then
+                    near[#near + 1] = m.Name .. ":" .. math.floor(mh.Health)
+                end
+            end
+        end
+        local line = string.format("SNAP %s | pos %s | hp %s | held %s | mobs30 [%s] | stage %s | status %s | last: %s",
+            tostring(reason):sub(1, 60),
+            r and string.format("%.0f,%.0f,%.0f", r.Position.X, r.Position.Y, r.Position.Z) or "?",
+            h and (math.floor(h.Health) .. "/" .. math.floor(h.MaxHealth)) or "?", heldName(), table.concat(near, " "),
+            tostring(F.impel and F.impel.stage), tostring(F.status):sub(1, 60), table.concat(F.recent, " << "))
+        F.onLog = nil
+        log(line)
+        F.onLog = R.onLog
+    end
+    function R.onLog(msg)
+        if msg:sub(1, 4) == "SNAP" or msg:sub(1, 4) == "TEST" then return end
+        local l = msg:lower()
+        if l:find("error") or l:find("stunned") or l:find("could not reach") or l:find("cannot reach") or l:find("walk failed") or l:find("gave up") or l:find("ran out") then
+            R.snap(msg)
+        end
+    end
+    F.onLog = R.onLog
+    task.spawn(function()
+        local lastStatus, since, wasAlive = "", os.clock(), true
+        while F.alive do
+            task.wait(1)
+            local al = C.alive()
+            if wasAlive and not al and C.char() then R.snap("died") end
+            wasAlive = al
+            if F.status ~= lastStatus then lastStatus = F.status since = os.clock()
+            elseif F.running and os.clock() - since > 20 then since = os.clock() R.snap("same status 20 s") end
+        end
+    end)
+
+    -- test <piece>: ONE function where the character stands; one line "TEST <piece> PASS|FAIL <numbers>".
+    local function dmgNow()
+        local ls = LP:FindFirstChild("leaderstats")
+        local d = ls and ls:FindFirstChild("Damage")
+        return d and tonumber(d.Value) or 0
+    end
+    function R.test(piece, args)
+        if R.testing then log("TEST " .. piece .. " FAIL another test is running") return end
+        R.testing = true
+        local prevMode = F.cfg.mode
+        F.cfg.mode = "Test"
+        F.running = true
+        F.status = "Test " .. piece
+        local pass, info = false, "unknown piece (fight chest drop walk maze build)"
+        local ok, err = pcall(function()
+            if piece == "fight" then
+                local sec = tonumber(args) or 20
+                local m = C.nearestMob(150, function() return true end)
+                if not m then info = "no mob within 150" return end
+                local mh, h = m:FindFirstChildOfClass("Humanoid"), C.hum()
+                local mhp0, hp0, dmg0, t0 = mh.Health, h.Health, dmgNow(), os.clock()
+                while F.alive and F.running and C.alive() and mh.Health > 0 and m.Parent and os.clock() - t0 < sec do
+                    C.attack(m, true)
+                end
+                local dealt = mhp0 - math.max(0, mh.Health)
+                local h2 = C.hum()
+                pass = dealt > 0 and C.alive()
+                info = string.format("%s hp %.0f -> %.0f (dealt %.0f, leaderstat +%.0f) own hp %.0f -> %.0f method %s held %s swings %s in %.0f s",
+                    m.Name, mhp0, math.max(0, mh.Health), dealt, dmgNow() - dmg0, hp0, h2 and h2.Health or 0,
+                    tostring(C.atk.names and C.atk.names[C.atk.method] or C.atk.method), heldName(), tostring(C.atk.swings), os.clock() - t0)
+            elseif piece == "chest" or piece == "drop" then
+                pass, info = F.impel.testUse(piece == "drop" and "loot" or "chest")
+            elseif piece == "walk" then
+                local x, y, z = args:match("^(-?[%d%.]+)[%s,]+(-?[%d%.]+)[%s,]+(-?[%d%.]+)")
+                if not x then info = "walk needs x y z" return end
+                local goal = Vector3.new(tonumber(x), tonumber(y), tonumber(z))
+                local r0, t0 = C.root().Position, os.clock()
+                local t = 0
+                while F.alive and F.running and C.alive() and os.clock() - t0 < 90 and (C.root().Position - goal).Magnitude > 8 do
+                    C.walkTo(goal, 6, 30)
+                    t = t + 1
+                end
+                local left = (C.root().Position - goal).Magnitude
+                local dt = os.clock() - t0
+                pass = left <= 8
+                info = string.format("%.0f studs in %.0f s (%.1f /s) left %.0f calls %d", (r0 - goal).Magnitude - left, dt, ((r0 - goal).Magnitude - left) / math.max(dt, 0.1), left, t)
+            elseif piece == "maze" then
+                pass, info = F.impel.testMaze(tonumber(args) or 240)
+            elseif piece == "build" then
+                pass, info = true, F.session.buildPlan()
+            end
+        end)
+        if not ok then pass = false info = "error " .. tostring(err):sub(1, 160) end
+        F.cfg.mode = prevMode
+        F.running = false
+        F.status = "Test " .. piece .. " done"
+        R.testing = false
+        log("TEST " .. piece .. " " .. (pass and "PASS" or "FAIL") .. " " .. tostring(info))
     end
 
     local function state()
@@ -2663,7 +2834,7 @@ do
         end)
         return {
             diag = diag,
-            t = os.date("%H:%M:%S"), version = VERSION, place = game.PlaceId, running = F.running, mode = F.cfg.mode, status = F.status,
+            t = os.date("%H:%M:%S"), version = VERSION, job = game.JobId, seq = MY_SEQ, dev = G.__gpo_hub_dev and true or false, place = game.PlaceId, running = F.running, mode = F.cfg.mode, status = F.status,
             last = F.lastAction, pos = r and { math.floor(r.Position.X), math.floor(r.Position.Y), math.floor(r.Position.Z) } or nil,
             hp = h and math.floor(h.Health) or nil, maxhp = h and math.floor(h.MaxHealth) or nil, speed = h and h.WalkSpeed or nil,
             floor = h and tostring(h.FloorMaterial) or nil, sprint = c and c:GetAttribute("MovementSprintActive") or false,
