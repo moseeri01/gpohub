@@ -16,7 +16,7 @@ if not game:IsLoaded() then pcall(function() game.Loaded:Wait() end) end
 local LP = Players.LocalPlayer
 while not LP do task.wait(0.2) LP = Players.LocalPlayer end
 local FOLDER = "gpohub"
-local VERSION = "ae_1"
+local VERSION = "sh_3"
 
 -- Every thread the hub starts runs inside pcall. The game's anti-cheat listens to ScriptContext.Error and sends the
 -- text of errors from scripts that are not its own to the server (read in the decompiled "anti" module), so an
@@ -2474,6 +2474,32 @@ do
                     end
                 end
                 log("ship: " .. n .. " vehicle seats within 600")
+                -- my own ship (Workspace.Ships.<name>Ship): size, seats, prompts, and the parts nearest to me (where to board)
+                local ships = workspace:FindFirstChild("Ships")
+                local mine = ships and ships:FindFirstChild(LP.Name .. "Ship")
+                if mine and r then
+                    pcall(function()
+                        local cf, size = mine:GetBoundingBox()
+                        log(string.format("ship box: centre %.0f,%.0f,%.0f size %.0f x %.0f x %.0f | look %.2f,%.2f", cf.Position.X, cf.Position.Y, cf.Position.Z,
+                            size.X, size.Y, size.Z, cf.LookVector.X, cf.LookVector.Z))
+                    end)
+                    local near = {}
+                    for _, d in ipairs(mine:GetDescendants()) do
+                        if d:IsA("ProximityPrompt") or d:IsA("ClickDetector") or d:IsA("Seat") or d:IsA("VehicleSeat") then
+                            local part = d:IsA("BasePart") and d or d.Parent
+                            local pos = part and part:IsA("BasePart") and part.Position
+                            log(string.format("ship item: %s %s %s @ %s", d.ClassName, d:GetFullName():sub(-60), d:IsA("ProximityPrompt") and (d.ActionText .. "/" .. d.ObjectText) or "",
+                                pos and string.format("%.0f,%.0f,%.0f", pos.X, pos.Y, pos.Z) or "?"))
+                        elseif d:IsA("BasePart") and d.CanCollide then
+                            near[#near + 1] = { d = (d.Position - r.Position).Magnitude, p = d }
+                        end
+                    end
+                    table.sort(near, function(a, b) return a.d < b.d end)
+                    for i = 1, math.min(5, #near) do
+                        local q = near[i].p
+                        log(string.format("ship part near me: %s %.0f away @ %.0f,%.0f,%.0f size %.0f x %.0f x %.0f", q.Name, near[i].d, q.Position.X, q.Position.Y, q.Position.Z, q.Size.X, q.Size.Y, q.Size.Z))
+                    end
+                end
             end)
         elseif cmd == "reset" then
             -- owner allowed it (20:45): when the character is wedged, reset it the way the Roblox menu does
