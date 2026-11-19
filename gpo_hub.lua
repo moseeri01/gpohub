@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "sh_2"
+local VERSION = "air_1"
 
 -- Every thread the hub starts runs inside pcall. The game's anti-cheat listens to ScriptContext.Error and sends the
 -- text of errors from scripts that are not its own to the server (read in the decompiled "anti" module), so an
@@ -565,6 +565,63 @@ do
         pcall(function() conn:Disconnect() end)
         pcall(function() cam.CameraType = oldType end)
         if not C.keyWalkLogged then C.keyWalkLogged = true log("key walk: used (W held, camera steering)" .. (okRun and "" or " - error inside")) end
+        return done
+    end
+    -- Air travel (air_1, experiment): the game's own sky walk (Geppo, "Sky Walk2": 1 % stamina + 1 per use, 0.2 s
+    -- cooldown, no count limit outside combat) pushes 50 studs/s along Humanoid.MoveDirection plus 25 up. Under
+    -- MoveTo the MoveDirection read 0, so Geppo only went up; with W held (key walk) it goes forward. So: aim the
+    -- camera at the target, hold W, jump, and Geppo again whenever we are in the air. Measures what it did.
+    function C.airTo(pos, limit, floorY)
+        local h, r = C.hum(), C.root()
+        local cam = workspace.CurrentCamera
+        if not (h and r and cam and VIM) then return false end
+        local function flat(a, b) return Vector3.new(a.X - b.X, 0, a.Z - b.Z).Magnitude end
+        local function press(down) pcall(function() VIM:SendKeyEvent(down, Enum.KeyCode.W, false, game) end) end
+        local start, t0, uses, lowest = r.Position, os.clock(), 0, r.Position.Y
+        local oldType = cam.CameraType
+        C.noSit(true)
+        local conn = game:GetService("RunService").RenderStepped:Connect(function()
+            pcall(function()
+                local rr = C.root()
+                if not rr then return end
+                local d = Vector3.new(pos.X - rr.Position.X, 0, pos.Z - rr.Position.Z)
+                if d.Magnitude < 0.5 then return end
+                d = d.Unit
+                cam.CFrame = CFrame.lookAt(rr.Position - d * 14 + Vector3.new(0, 7, 0), rr.Position + d * 6)
+            end)
+        end)
+        pcall(function() cam.CameraType = Enum.CameraType.Scriptable end)
+        local done, why = false, "timeout"
+        pcall(function()
+            task.wait(0.05)
+            press(true)
+            while F.alive and F.running and C.alive() do
+                local rr, hh = C.root(), C.hum()
+                if not rr or not hh then why = "no character" return end
+                lowest = math.min(lowest, rr.Position.Y)
+                if flat(rr.Position, pos) <= 15 then done = true why = "arrived" return end
+                if os.clock() - t0 > (limit or 30) then return end
+                if floorY and rr.Position.Y < floorY then why = "too low" return end
+                if hh:GetState() == Enum.HumanoidStateType.Swimming then why = "in water" return end
+                if hh.FloorMaterial == Enum.Material.Air then
+                    if C.geppo() then uses = uses + 1 end
+                    task.wait(0.22)
+                else
+                    C.jumpAt = 0
+                    C.jump()
+                    task.wait(0.25)
+                end
+            end
+            why = "stopped"
+        end)
+        press(false)
+        pcall(function() conn:Disconnect() end)
+        pcall(function() cam.CameraType = oldType end)
+        C.noSit(false)
+        local rr = C.root()
+        local dist = rr and flat(rr.Position, start) or 0
+        local dt = os.clock() - t0
+        log(string.format("air: %s | %.0f studs in %.1f s (%.1f /s) | %d geppo | lowest y %.0f | now y %.0f", why, dist, dt, dist / math.max(dt, 0.1), uses, lowest, rr and rr.Position.Y or 0))
         return done
     end
     function C.walkInner(pos, near, limit, stop)
@@ -2334,6 +2391,20 @@ do
             log("remote: stop")
         elseif cmd == "cancel" then
             R.goal = nil
+        elseif cmd == "air" then
+            -- air <x> <y> <z> [seconds]: sky-walk test toward a point (measures distance, time, uses)
+            local x, y, z, sec = rest:match("^(-?[%d%.]+)[%s,]+(-?[%d%.]+)[%s,]+(-?[%d%.]+)%s*([%d%.]*)$")
+            if x then
+                task.spawn(function()
+                    local was = F.running
+                    F.running = true
+                    F.status = "Air test"
+                    log("remote: air " .. rest)
+                    C.airTo(Vector3.new(tonumber(x), tonumber(y), tonumber(z)), tonumber(sec) or 12, nil)
+                    F.running = was
+                    F.status = "Idle"
+                end)
+            end
         elseif cmd == "ship" then
             -- sea travel, step 1 (probe): the game's menu wheel spawns the player's boat with
             -- Events.ShipEvents.Spawn:InvokeServer("true") (decompiled MenuWheel "Boat.OneClick"). Do the same once
