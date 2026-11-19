@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "m_23"
+local VERSION = "m_24"
 
 -- Every thread the hub starts runs inside pcall. The game's anti-cheat listens to ScriptContext.Error and sends the
 -- text of errors from scripts that are not its own to the server (read in the decompiled "anti" module), so an
@@ -652,7 +652,7 @@ do
         C.noSit(true)
         local ok = true
         for i = first, #points do
-            if not C.walkStraight(points[i], i == #points and (near or 4) or 6, 14) then
+            if not C.walkTo(points[i], i == #points and (near or 4) or 6, 20) then
                 ok = false
                 local rr = C.root()
                 if os.clock() - (C.failAt or 0) > 3 and rr then
