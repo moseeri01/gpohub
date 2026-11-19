@@ -25,7 +25,7 @@ while not LP do task.wait(0.2) LP = Players.LocalPlayer end
 task.wait(0.3)
 if G.__gpo_hub_seq ~= MY_SEQ then return end
 local FOLDER = "gpohub"
-local VERSION = "one_1"
+local VERSION = "k_1"
 
 -- Exact build. GitHub serves the main file from a cache for about 5 minutes, so a hub loaded right after a push
 -- can be an older build. gpohub/want.txt (written at push time on this PC) names the commit to run; a hub that
@@ -974,7 +974,9 @@ do
         return c:FindFirstChildOfClass("Tool")
     end
 
-    local SKILL_KEYS = { Enum.KeyCode.Z, Enum.KeyCode.X, Enum.KeyCode.C }
+    -- weapon / fruit skills sit on E, R, Z, X, C. One key every 1.5 s (was Z / X / C, one every 4 s: against a guard
+    -- group on floor 1 the hub lost 2000 HP while killing almost nothing, 23:15).
+    local SKILL_KEYS = { Enum.KeyCode.Z, Enum.KeyCode.X, Enum.KeyCode.C, Enum.KeyCode.E, Enum.KeyCode.R }
     local lastSkill, skillN = 0, 0
 
     -- M1 has three ways (tool:Activate, an injected mouse click, the executor s own mouse1click). The game s swing
@@ -1116,7 +1118,7 @@ do
         end
         swing(tool)
         -- no skills until a swing way is proven (or every way was tried), so the proof is not a skill s damage
-        if useSkills and close and (ATK.proven or ATK.tries >= #ATK.names) and os.clock() - lastSkill > 4 then
+        if useSkills and close and (ATK.proven or ATK.tries >= #ATK.names) and os.clock() - lastSkill > 1.5 then
             lastSkill = os.clock()
             skillN = skillN % #SKILL_KEYS + 1
             aim(hr.Position)
