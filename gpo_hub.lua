@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "g_5"
+local VERSION = "g_6"
 
 -- Every thread the hub starts runs inside pcall. The game's anti-cheat listens to ScriptContext.Error and sends the
 -- text of errors from scripts that are not its own to the server (read in the decompiled "anti" module), so an
@@ -49,7 +49,7 @@ local F = {
         -- Impel Down
         idDiff = "Nightmare", idSolo = true, idSecret = true, idRequeue = true, idBuy = "Nothing", idKeep = 200000,
         mobNames = "", mobRange = 80, mobSkills = false, fruitAlert = true,
-        idCuffs = true, idChests = true, idLoot = true, idSkipJunk = true, idFight = true, idFightRange = 40, idSkills = false, idBosses = false, idGear = true, idMaze = true, idGoPad = true,
+        idCuffs = true, idChests = true, idLoot = true, idSkipJunk = true, idFight = true, idFightRange = 40, idSkills = false, idBosses = false, idGear = true, idStats = true, idMaze = true, idGoPad = true,
         -- Boss
         bossHop = false, bossList = { Juzo = true },
         bossRadiant = false, bossRoger = false, bossHawk = false,
@@ -1596,6 +1596,60 @@ do
         end
     end)
 
+    -- Raid build (g_6). Inside Impel Down the character starts with base stats (Str 100, Def 250, Stam 250) and
+    -- about 1125 free points; the game even shows "spend your skill points to get stronger" (screen 21:15). The hub
+    -- never spent them and died twice to the first guard wave. These points belong to the raid only (the game
+    -- resets them itself later), so they are spent at once: half into the weapon stat, 35 % Defense, 15 % Stamina.
+    -- Same call as the + button, in chunks; stops when the points do not go down.
+    task.spawn(function()
+        local fails, planned = 0, nil
+        while F.alive do
+            task.wait(2)
+            local sp = tonumber(S.stat("SkillPoints")) or 0
+            if F.running and F.cfg.idStats and F.impel.inRaid() and sp > 0 and fails < 4 then
+                local ev = RS:FindFirstChild("Events")
+                ev = ev and ev:FindFirstChild("stats")
+                if ev and ev:IsA("RemoteEvent") then
+                    if not planned then
+                        local c = LP.Character
+                        local tool = c and c:FindFirstChildOfClass("Tool")
+                        local fruit = tool and tool:GetAttribute("devilFruit")
+                        local weapon = fruit and "DevilFruitMastery" or "SwordMastery"
+                        planned = { { weapon, math.floor(sp * 0.5) }, { "Defense", math.floor(sp * 0.35) }, { "Stamina", math.floor(sp * 0.15) } }
+                        log("raid build: " .. sp .. " points -> " .. weapon .. " 50 % / Defense 35 % / Stamina 15 %")
+                    end
+                    local did = false
+                    for _, it in ipairs(planned) do
+                        if it[2] > 0 then
+                            local n = math.min(it[2], 50, sp)
+                            pcall(function() ev:FireServer(it[1], nil, n) end)
+                            task.wait(0.8)
+                            local now = tonumber(S.stat("SkillPoints")) or 0
+                            if now < sp then
+                                it[2] = it[2] - (sp - now)
+                                fails = 0
+                            else
+                                fails = fails + 1
+                                it[2] = 0   -- capped or refused: give this share up
+                                log("raid build: " .. it[1] .. " refused (cap?)")
+                            end
+                            did = true
+                            break
+                        end
+                    end
+                    if not did then
+                        -- shares used up, points left (rounding or a cap): put the rest into Defense, then stop
+                        pcall(function() ev:FireServer("Defense", nil, sp) end)
+                        task.wait(0.8)
+                        fails = 4
+                        log("raid build done: Str " .. tostring(S.stat("Strength")) .. " Def " .. tostring(S.stat("Defense")) .. " Stam " .. tostring(S.stat("Stamina"))
+                            .. " Swd " .. tostring(S.stat("SwordMastery")) .. " DF " .. tostring(S.stat("DevilFruitMastery")) .. " left " .. tostring(S.stat("SkillPoints")))
+                    end
+                end
+            end
+        end
+    end)
+
     -- Discord alert (Settings): Epic and better drops go to the owner's own webhook. The URL is typed into the hub
     -- and lives only in gpohub/config.json; it is never logged.
     local ALERT = { Epic = true, Legendary = true, Mythical = true }
@@ -2168,6 +2222,7 @@ UI.toggle(idnow, "Open chests", cfgGet("idChests"), cfgSet("idChests"))
 UI.toggle(idnow, "Grab drops", cfgGet("idLoot"), cfgSet("idLoot"))
 UI.toggle(idnow, "Skip Wooden Plank", cfgGet("idSkipJunk"), cfgSet("idSkipJunk"))
 UI.toggle(idnow, "Pick gear by the game's item table", cfgGet("idGear"), cfgSet("idGear"))
+UI.toggle(idnow, "Spend the raid's skill points", cfgGet("idStats"), cfgSet("idStats"))
 UI.toggle(idnow, "Fight Impel Guards", cfgGet("idFight"), cfgSet("idFight"))
 UI.stepper(idnow, "Fight guards within", 10, 120, cfgGet("idFightRange"), cfgSet("idFightRange"), 10)
 UI.toggle(idnow, "Use skills Z / X / C", cfgGet("idSkills"), cfgSet("idSkills"))
