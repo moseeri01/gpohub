@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "m_8"
+local VERSION = "m_9"
 
 local F = {
     alive = true,
@@ -41,7 +41,7 @@ local F = {
         -- Level
         lvlTarget = 325, lvlQuest = true, lvlMove = true, lvlStats = "Sword / Defense", autoStats = false, lvlHaki = false, lvlBlock = false,
         -- Settings
-        normalSpeed = true, stopNearPlayer = true, antiAfk = true, autoRejoin = false,
+        normalSpeed = true, sprint = true, stopNearPlayer = true, antiAfk = true, autoRejoin = false,
         discordAlert = false, pickUp = false, webhook = "", bossAlert = true, bossRange = 300, bossSkills = false,
     },
 }
@@ -410,8 +410,56 @@ do
         return nil
     end
 
-    -- walk to pos; false on timeout, stuck, stop() or Start turned off
+    -- The game's own input layer (read from the decompiled Backpack scripts, m_8 probe):
+    --   Backpack.Movements : double W  -> InputCallbacks.Callbacks.Run.HoldingRun = true ; Run:PC_Activate()   (sprint, WalkSpeed 25)
+    --   Backpack.MeleeScript: mouse 1  -> while held: if InputCallbacks.Utils.canAutoM1() then Callbacks.Attack:PC_Activate()
+    --   key J -> Callbacks.Buso:PC_Activate() ; key Q -> Callbacks.Dash:PC_Activate()
+    -- The hub calls the same functions, so the game sends its own calls exactly as for a key press.
+    -- The Backpack (and this module) is new after every respawn, so it is looked up each time.
+    function C.input()
+        local bp = LP:FindFirstChild("Backpack")
+        local m = bp and bp:FindFirstChild("InputCallbacks")
+        if not m then return nil end
+        if C.icMod ~= m then
+            local ok, t = pcall(require, m)
+            C.icMod = m
+            C.ic = (ok and type(t) == "table" and type(t.Callbacks) == "table") and t or nil
+            log(C.ic and "input: game callbacks ready" or ("input: cannot use game callbacks (" .. tostring(t):sub(1, 80) .. ")"))
+        end
+        return C.ic
+    end
+    function C.sprint(on)
+        local ic = C.input()
+        local run = ic and ic.Callbacks.Run
+        if not run then return end
+        if not on then
+            if C.sprintOn then C.sprintOn = false pcall(function() run.HoldingRun = false end) end
+            return
+        end
+        local c = LP.Character
+        if (c and c:GetAttribute("MovementSprintActive")) or os.clock() - (C.sprintAt or 0) < 1 then return end
+        C.sprintAt = os.clock()
+        C.sprintOn = true
+        if not C.sprintLogged then C.sprintLogged = true log("sprint: asking the game to run") end
+        task.spawn(function()
+            local ok, e = pcall(function()
+                run.HoldingRun = true
+                run:PC_Activate()
+            end)
+            if not ok and not C.sprintErr then C.sprintErr = true log("sprint error: " .. tostring(e):sub(1, 120)) end
+        end)
+    end
+
+    -- walk to pos; false on timeout, stuck, stop() or Start turned off. Long walks sprint (Settings).
     function C.walkTo(pos, near, limit, stop)
+        local r0 = C.root()
+        C.wantSprint = (F.cfg.sprint and r0 ~= nil and (r0.Position - pos).Magnitude > 30) or false
+        local ok, res = pcall(C.walkInner, pos, near, limit, stop)
+        C.wantSprint = false
+        C.sprint(false)
+        return ok and res or false
+    end
+    function C.walkInner(pos, near, limit, stop)
         local h, r = C.hum(), C.root()
         if not h or not r then return false end
         near = near or 4
@@ -449,6 +497,7 @@ do
                 if os.clock() - t0 > (limit or 20) then return fail("timeout") end
                 if stop and stop() then return false end
                 h:MoveTo(target)
+                if C.wantSprint then C.sprint(true) end
                 task.wait(0.25)
                 if (r.Position - lastPos).Magnitude < 0.5 then
                     stuck = stuck + 1
@@ -533,7 +582,7 @@ do
     --   swing  = the character s M1 attributes change (M1DashRecoverySwingId / LastLandedM1SwingId, seen in records)
     --   damage = target hp drops or leaderstats.Damage rises
     -- A way that swings is kept and the hub steps closer; a way that does not swing is swapped after 4 s.
-    local ATK = { method = 1, names = { "tool:Activate", "mouse click", "mouse1click" }, mark = nil, proven = false, swings = false, tries = 0, reach = 5 }
+    local ATK = { method = 1, names = { "game M1 call", "mouse click", "mouse1click" }, mark = nil, proven = false, swings = false, tries = 0, reach = 5 }
     C.atk = ATK
     local function dmgStat()
         local ls = LP:FindFirstChild("leaderstats")
@@ -563,7 +612,15 @@ do
     end
     local function swing(tool)
         if ATK.method == 1 then
-            if tool then pcall(function() tool:Activate() end) end
+            -- the same call MeleeScript makes while mouse 1 is held (tool:Activate does nothing in this game)
+            local ic = C.input()
+            local atk = ic and ic.Callbacks.Attack
+            if atk then
+                local can = "?"
+                pcall(function() can = ic.Utils.canAutoM1() end)
+                ATK.can = can
+                if can == true then task.spawn(function() pcall(function() atk:PC_Activate() end) end) end
+            end
         elseif ATK.method == 2 then
             if not VIM then return end
             local x, y = clickPoint()
@@ -627,7 +684,7 @@ do
                 end
                 ATK.mark = nil
             elseif not ATK.proven and os.clock() - mk.t > 4 then
-                local what = string.format("dist %.1f, tool %s, target hp %.0f", dist, tool and tool.Name or "none", h.Health)
+                local what = string.format("dist %.1f, tool %s, target hp %.0f, canAutoM1 %s", dist, tool and tool.Name or "none", h.Health, tostring(ATK.can))
                 if mk.swung then
                     -- it swings but nothing lands: stand closer instead of changing the way
                     ATK.reach = math.max(2.5, ATK.reach - 1)
@@ -987,8 +1044,15 @@ do
             lastHaki = os.clock()
             task.delay(1.5, function()
                 if F.alive and F.running then
-                    C.key(Enum.KeyCode.J)
-                    log("haki: pressed J")
+                    local ic = C.input()
+                    local buso = ic and ic.Callbacks.Buso
+                    if buso then
+                        pcall(function() buso:PC_Activate() end)
+                        log("haki: asked the game to turn Buso on")
+                    else
+                        C.key(Enum.KeyCode.J)
+                        log("haki: pressed J")
+                    end
                 end
             end)
         end
@@ -1630,6 +1694,7 @@ UI.toggle(un, "Perfect block x200", cfgGet("lvlBlock"), cfgSet("lvlBlock"))
 local settings = UI.page("Settings", 8)
 local sf = UI.card(settings, 1, "Safety")
 UI.toggle(sf, "Move at normal speed only", cfgGet("normalSpeed"), cfgSet("normalSpeed"))
+UI.toggle(sf, "Sprint on long walks (game's own run)", cfgGet("sprint"), cfgSet("sprint"))
 UI.toggle(sf, "Stop when a player is near", cfgGet("stopNearPlayer"), cfgSet("stopNearPlayer"))
 UI.toggle(sf, "Anti AFK", cfgGet("antiAfk"), cfgSet("antiAfk"))
 UI.toggle(sf, "Auto rejoin", cfgGet("autoRejoin"), cfgSet("autoRejoin"))
