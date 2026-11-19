@@ -1060,8 +1060,7 @@ do
             local okd, src = pcall(decompile, sc)
             local name = string.format("%04d_%s.lua", i, sc.Name:gsub("[^%w%-]", "_"):sub(1, 40))
             if okd and type(src) == "string" and #src > 0 then
-                pcall(writefile, dir .. "/" .. name, "-- " .. sc:GetFullName() .. "
-" .. src)
+                pcall(writefile, dir .. "/" .. name, "-- " .. sc:GetFullName() .. "\n" .. src)
                 ok_n = ok_n + 1
                 index[#index + 1] = name .. " | " .. #src .. " bytes | " .. sc.ClassName .. " " .. sc:GetFullName()
             else
@@ -1069,9 +1068,7 @@ do
             end
             if i % 5 == 0 then task.wait() end
         end
-        pcall(writefile, dir .. "/_index.txt", table.concat(index, "
-") .. "
-")
+        pcall(writefile, dir .. "/_index.txt", table.concat(index, "\n") .. "\n")
         log("probe: read " .. ok_n .. " of " .. #list .. " player scripts into " .. dir)
     end)
 
