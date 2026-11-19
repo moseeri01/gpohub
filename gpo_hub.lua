@@ -10,7 +10,27 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "m_12"
+local VERSION = "m_13"
+
+-- Every thread the hub starts runs inside pcall. The game's anti-cheat listens to ScriptContext.Error and sends the
+-- text of errors from scripts that are not its own to the server (read in the decompiled "anti" module), so an
+-- error of ours must never surface. task.spawn / task.delay / task.defer below are these safe versions.
+local hubErrors = {}
+local rawTask = task
+local function guarded(fn)
+    return function(...)
+        local ok, err = pcall(fn, ...)
+        if not ok then
+            hubErrors[#hubErrors + 1] = os.date("%H:%M:%S ") .. tostring(err):sub(1, 200)
+            if #hubErrors > 20 then table.remove(hubErrors, 1) end
+        end
+    end
+end
+local task = setmetatable({
+    spawn = function(fn, ...) return rawTask.spawn(guarded(fn), ...) end,
+    delay = function(t, fn, ...) return rawTask.delay(t, guarded(fn), ...) end,
+    defer = function(fn, ...) return rawTask.defer(guarded(fn), ...) end,
+}, { __index = rawTask })
 
 local F = {
     alive = true,
@@ -81,6 +101,7 @@ loadAll()
 task.spawn(function()
     while F.alive do
         task.wait(5)
+        while #hubErrors > 0 do logLines[#logLines + 1] = "hub error (caught): " .. table.remove(hubErrors, 1) end
         if #logLines > 0 and canFiles then
             ensureFolder()
             local chunk = table.concat(logLines, "\n") .. "\n"
