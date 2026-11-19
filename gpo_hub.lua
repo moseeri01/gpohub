@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "m_18"
+local VERSION = "m_19"
 
 -- Every thread the hub starts runs inside pcall. The game's anti-cheat listens to ScriptContext.Error and sends the
 -- text of errors from scripts that are not its own to the server (read in the decompiled "anti" module), so an
@@ -584,6 +584,22 @@ do
         end
         if used > 0 and not C.geppoLogged then C.geppoLogged = true log("geppo: used to get over an obstacle") end
     end
+    -- stuck against an edge (door frame, pillar): step sideways for a moment, left and right in turn, a bit
+    -- further each time. Loop tick 20:35: stood at 5953,9,-10132 before route point 14 (5957,10,-10143), already on
+    -- the right height, 3.6 studs left of the recorded line -> blocked by the side of an opening.
+    function C.sidestep(toward)
+        local h, r = C.hum(), C.root()
+        if not h or not r then return end
+        local dir = Vector3.new(toward.X - r.Position.X, 0, toward.Z - r.Position.Z)
+        if dir.Magnitude < 0.5 then return end
+        dir = dir.Unit
+        C.sideN = (C.sideN or 0) + 1
+        local side = (C.sideN % 2 == 0) and 1 or -1
+        local reach = 4 + 2 * math.floor((C.sideN - 1) / 2)
+        local perp = Vector3.new(-dir.Z, 0, dir.X) * side * math.min(reach, 12)
+        h:MoveTo(r.Position + perp - dir * 1.5)
+        task.wait(0.55)
+    end
     -- straight walk to a point, no path search; jumps when it stops moving (steps, ledges)
     function C.walkStraight(pos, near, limit)
         local t0, lastPos, stuck = os.clock(), nil, 0
@@ -598,9 +614,12 @@ do
             task.wait(0.2)
             if lastPos and (r.Position - lastPos).Magnitude < 0.4 then
                 stuck = stuck + 1
-                if stuck >= 6 then C.overObstacle() elseif stuck >= 2 then C.jump() end
-                if stuck >= 30 then return false end
-            else stuck = 0 end
+                if stuck >= 4 and stuck % 4 == 0 then C.sidestep(pos) elseif stuck >= 6 then C.overObstacle() elseif stuck >= 2 then C.jump() end
+                if stuck >= 40 then return false end
+            else
+                if stuck == 0 then C.sideN = 0 end
+                stuck = 0
+            end
             lastPos = r.Position
         end
         return false
