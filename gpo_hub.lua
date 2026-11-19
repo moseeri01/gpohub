@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "m_29"
+local VERSION = "g_1"
 
 -- Every thread the hub starts runs inside pcall. The game's anti-cheat listens to ScriptContext.Error and sends the
 -- text of errors from scripts that are not its own to the server (read in the decompiled "anti" module), so an
@@ -49,7 +49,7 @@ local F = {
         -- Impel Down
         idDiff = "Nightmare", idSolo = true, idSecret = true, idRequeue = true, idBuy = "Nothing", idKeep = 200000,
         mobNames = "", mobRange = 80, mobSkills = false, fruitAlert = true,
-        idCuffs = true, idChests = true, idLoot = true, idSkipJunk = true, idFight = true, idFightRange = 40, idSkills = false, idBosses = false, idMaze = true, idGoPad = true,
+        idCuffs = true, idChests = true, idLoot = true, idSkipJunk = true, idFight = true, idFightRange = 40, idSkills = false, idBosses = false, idGear = true, idMaze = true, idGoPad = true,
         -- Boss
         bossHop = false, bossList = { Juzo = true },
         bossRadiant = false, bossRoger = false, bossHawk = false,
@@ -970,6 +970,61 @@ do
         F.conns[#F.conns + 1] = fx.DescendantRemoving:Connect(function(d) ID.prompts[d] = nil end)
     end)
 
+    -- Gear rules (g_1, owner 21:05: "choose by our database, do not open every chest").
+    -- The database is the game's own item table ReplicatedStorage.Modules.ToolDesc (name -> Type, Rare, Max; read
+    -- live with require, about 1000 items): weapon = Katana / Katana2 / Gun, wear = Outfit / Cap / Cape / Head / ...,
+    -- Drink, and things of no use inside a raid (Display, Artifact, Grip, Egg ...). A drop is taken when it is
+    -- better than what this run already took for the same slot. Items the table does not know (fruits drop under
+    -- short names like "Gomu") are taken. Chests stop being opened once the kit is complete.
+    local RANK = { Common = 1, Uncommon = 2, Rare = 3, Epic = 4, Legendary = 5, Mythical = 6, Collectable = 2 }
+    local WEAPON = { Katana = true, Katana2 = true, Gun = true }
+    local WEAR = { Outfit = true, Cap = true, Cape = true, Head = true, Jaw = true, Glasses = true, Back = true, Ears = true,
+        Headband = true, TorsoScarf = true, Chest = true, Shoulder = true, Shoulder2 = true, Waist = true, Aura = true }
+    local KEEP = { Essence = true, FruitRemover = true }   -- cheap to grab; not known whether they leave the raid
+    ID.kit = { slots = {}, drinks = 0, unknown = 0, skipped = {} }
+    local toolDesc = nil
+    local function itemInfo(name)
+        if toolDesc == nil then
+            toolDesc = false
+            pcall(function()
+                local m = game:GetService("ReplicatedStorage").Modules.ToolDesc
+                local t = require(m)
+                if type(t) == "table" then toolDesc = t end
+            end)
+            log(toolDesc and "gear: game item table loaded" or "gear: game item table not readable - taking everything")
+        end
+        return toolDesc and toolDesc[name] or nil
+    end
+    -- "take" / "skip" and the slot it fills
+    local function judge(name)
+        local info = itemInfo(name)
+        if not toolDesc then return true, nil, 0 end
+        if type(info) ~= "table" then return ID.kit.unknown < 3, "?", 0 end
+        local ty, rk = tostring(info.Type), RANK[tostring(info.Rare)] or 1
+        if WEAPON[ty] or WEAR[ty] then return rk > (ID.kit.slots[ty] or 0), ty, rk end
+        if ty == "Drink" then return ID.kit.drinks < 6, ty, rk end
+        if KEEP[ty] then return (ID.kit.slots[name] or 0) < 1, name, 1 end
+        return false, ty, rk
+    end
+    function ID.kitDone()
+        local s = ID.kit.slots
+        local weapon = math.max(s.Katana or 0, s.Katana2 or 0, s.Gun or 0)
+        local wear = 0
+        for ty in pairs(WEAR) do if s[ty] then wear = wear + 1 end end
+        return weapon >= 3 and wear >= 4 and ID.kit.unknown >= 1
+    end
+    function ID.kitLine()
+        local s = ID.kit.slots
+        local wear = 0
+        for ty in pairs(WEAR) do if s[ty] then wear = wear + 1 end end
+        return string.format("weapon %d  wear %d  fruit? %d  drinks %d", math.max(s.Katana or 0, s.Katana2 or 0, s.Gun or 0), wear, ID.kit.unknown, ID.kit.drinks)
+    end
+    local function took(name)
+        local ok, slot, rk = judge(name)
+        if slot == "?" then ID.kit.unknown = ID.kit.unknown + 1
+        elseif slot == "Drink" then ID.kit.drinks = ID.kit.drinks + 1
+        elseif slot then ID.kit.slots[slot] = math.max(ID.kit.slots[slot] or 0, rk) end
+    end
     local function kindOf(p)
         local act, obj = p.ActionText or "", p.ObjectText or ""
         if act == "Use" and obj == (LP.Name .. "'s Handcuff Key") then return "key" end
@@ -978,6 +1033,13 @@ do
             local m = p:FindFirstAncestorOfClass("Model")
             if m and m:GetAttribute("brItem") == true then
                 if F.cfg.idSkipJunk and JUNK[obj] then return nil end
+                if F.cfg.idGear then
+                    local take, slot = judge(obj)
+                    if not take then
+                        if not ID.kit.skipped[obj] then ID.kit.skipped[obj] = true log("gear: skip " .. obj .. " (" .. tostring(slot) .. ")") end
+                        return nil
+                    end
+                end
                 return "loot"
             end
         end
@@ -1167,10 +1229,16 @@ do
         -- 2950,-13881, fought guards around 2940,-13900 and got "PROCEED THROUGH THE MAZE" at 2947,-13961.
         local gear = ID.stage:find("GEAR UP", 1, true) ~= nil
         if gear and not ID.gearT then ID.gearT = os.clock() end
-        local hurry = gear and ID.gearT and os.clock() - ID.gearT > 240
+        local hurry = gear and ID.gearT and (os.clock() - ID.gearT > 240 or (F.cfg.idGear and ID.kitDone()))
+        if hurry and not ID.hurryLogged then ID.hurryLogged = true log("gear: kit done or time up (" .. ID.kitLine() .. ") - no more far chests") end
         if F.cfg.idLoot then
             local p = nearestPrompt("loot", hurry and 40 or 120)
-            if p then use(p, "drop", "loot") return end
+            if p then
+                local name = p.ObjectText
+                use(p, "drop", "loot")
+                if ID.pressed[p] then took(name) end
+                return
+            end
         end
         if F.cfg.idChests then
             -- in the maze only chests close by, or the walk to each one fights the walls
@@ -2058,6 +2126,7 @@ UI.toggle(idnow, "Free myself from the cuffs", cfgGet("idCuffs"), cfgSet("idCuff
 UI.toggle(idnow, "Open chests", cfgGet("idChests"), cfgSet("idChests"))
 UI.toggle(idnow, "Grab drops", cfgGet("idLoot"), cfgSet("idLoot"))
 UI.toggle(idnow, "Skip Wooden Plank", cfgGet("idSkipJunk"), cfgSet("idSkipJunk"))
+UI.toggle(idnow, "Pick gear by the game's item table", cfgGet("idGear"), cfgSet("idGear"))
 UI.toggle(idnow, "Fight Impel Guards", cfgGet("idFight"), cfgSet("idFight"))
 UI.stepper(idnow, "Fight guards within", 10, 120, cfgGet("idFightRange"), cfgSet("idFightRange"), 10)
 UI.toggle(idnow, "Use skills Z / X / C", cfgGet("idSkills"), cfgSet("idSkills"))
@@ -2067,6 +2136,7 @@ UI.note(idnow, "Home: Mode Impel Down + Start. Walks only. Queue, maze route and
 local idst = UI.card(impel, 2, "This run")
 UI.info(idst, "Stage", function() return F.impel and F.impel.stage or "-" end)
 UI.info(idst, "Chests / drops", function() return F.impel and (F.impel.done.chests .. " / " .. F.impel.done.loot) or "-" end)
+UI.info(idst, "Kit (rarity 1-6)", function() return F.impel and F.impel.kitLine and F.impel.kitLine() or "-" end)
 UI.info(idst, "Maze", function()
     local m = F.impel and F.impel.maze
     if not m then return "-" end
