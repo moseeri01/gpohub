@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "m_15"
+local VERSION = "m_16"
 
 -- Every thread the hub starts runs inside pcall. The game's anti-cheat listens to ScriptContext.Error and sends the
 -- text of errors from scripts that are not its own to the server (read in the decompiled "anti" module), so an
@@ -1646,8 +1646,13 @@ end
 -- Nothing here talks to the game; goto uses the same walking as everything else.
 --------------------------------------------------------------------------------
 do
-    local R = { goal = nil }
+    local R = { goal = nil, focused = "unknown" }
     F.remote = R
+    pcall(function()
+        local UIS2 = game:GetService("UserInputService")
+        F.conns[#F.conns + 1] = UIS2.WindowFocused:Connect(function() R.focused = "yes" end)
+        F.conns[#F.conns + 1] = UIS2.WindowFocusReleased:Connect(function() R.focused = "no" end)
+    end)
     local CMD, STATE = FOLDER .. "/cmd.txt", FOLDER .. "/state.json"
     local LOADER = "https://raw.githubusercontent.com/moseeri01/gpohub/main/gpo_hub.lua"
 
@@ -1721,7 +1726,33 @@ do
         end
         local c = LP.Character
         local a = C.atk
+        -- fixed movement diagnostics (m_16): why a walk does not move
+        local diag = {}
+        pcall(function()
+            local UIS2, GS = game:GetService("UserInputService"), game:GetService("GuiService")
+            diag.state = h and tostring(h:GetState()):gsub("Enum.HumanoidStateType.", "") or nil
+            diag.sit, diag.platform, diag.jumpPower = h and h.Sit, h and h.PlatformStand, h and h.JumpPower
+            diag.anchored = r and r.Anchored
+            diag.moveDir = h and string.format("%.2f,%.2f,%.2f", h.MoveDirection.X, h.MoveDirection.Y, h.MoveDirection.Z)
+            diag.vel = r and string.format("%.1f,%.1f,%.1f", r.AssemblyLinearVelocity.X, r.AssemblyLinearVelocity.Y, r.AssemblyLinearVelocity.Z)
+            diag.walkTo = h and string.format("%.0f,%.0f,%.0f", h.WalkToPoint.X, h.WalkToPoint.Y, h.WalkToPoint.Z)
+            diag.menuOpen = GS.MenuIsOpen
+            diag.textBox = UIS2:GetFocusedTextBox() ~= nil
+            diag.focused = R.focused
+            local marks = {}
+            if c then
+                for _, n in ipairs({ "Stun", "Cuffed", "Blocking", "ragcarry", "Block", "Grabbed", "Carried" }) do
+                    if c:FindFirstChild(n) then marks[#marks + 1] = n end
+                end
+                local at = {}
+                for k, v in pairs(c:GetAttributes()) do at[#at + 1] = k .. "=" .. tostring(v):sub(1, 20) end
+                diag.attrs = table.concat(at, " ")
+            end
+            diag.marks = table.concat(marks, " ")
+            diag.moveWay = C.moveWay
+        end)
         return {
+            diag = diag,
             t = os.date("%H:%M:%S"), version = VERSION, place = game.PlaceId, running = F.running, mode = F.cfg.mode, status = F.status,
             last = F.lastAction, pos = r and { math.floor(r.Position.X), math.floor(r.Position.Y), math.floor(r.Position.Z) } or nil,
             hp = h and math.floor(h.Health) or nil, maxhp = h and math.floor(h.MaxHealth) or nil, speed = h and h.WalkSpeed or nil,
