@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "kw_2"
+local VERSION = "sh_1"
 
 -- Every thread the hub starts runs inside pcall. The game's anti-cheat listens to ScriptContext.Error and sends the
 -- text of errors from scripts that are not its own to the server (read in the decompiled "anti" module), so an
@@ -59,7 +59,7 @@ local F = {
         -- Fishing
         fishSpot = "Rough Waters", fishBait = true, fishSell = true, fishKeepLeg = true, fishMegalodon = false,
         -- Level
-        lvlTarget = 325, lvlQuest = true, lvlMove = true, lvlStats = "Sword / Defense", autoStats = false, lvlHaki = false, lvlBlock = false,
+        lvlTarget = 675, lvlQuest = true, lvlMove = true, lvlStats = "Sword / Defense", autoStats = false, lvlHaki = false, lvlBlock = false,
         -- Settings
         normalSpeed = true, sprint = true, keyWalk = true, geppo = true, stopNearPlayer = true, antiAfk = true, autoRejoin = false,
         discordAlert = false, pickUp = false, webhook = "", bossAlert = true, bossRange = 300, bossSkills = false,
@@ -2326,6 +2326,39 @@ do
             log("remote: stop")
         elseif cmd == "cancel" then
             R.goal = nil
+        elseif cmd == "ship" then
+            -- sea travel, step 1 (probe): the game's menu wheel spawns the player's boat with
+            -- Events.ShipEvents.Spawn:InvokeServer("true") (decompiled MenuWheel "Boat.OneClick"). Do the same once
+            -- and write down every VehicleSeat within 600 studs, so the next step (board + steer) is built on facts.
+            task.spawn(function()
+                local r = C.root()
+                local ev = game:GetService("ReplicatedStorage"):FindFirstChild("Events")
+                ev = ev and ev:FindFirstChild("ShipEvents")
+                ev = ev and ev:FindFirstChild("Spawn")
+                local res = "no remote"
+                if rest ~= "list" and ev and ev:IsA("RemoteFunction") then
+                    local ok, v = pcall(function() return ev:InvokeServer("true") end)
+                    res = (ok and "answer " or "error ") .. tostring(v)
+                    task.wait(3)
+                end
+                log("ship: spawn " .. res)
+                local n = 0
+                for _, d in ipairs(workspace:GetDescendants()) do
+                    if d:IsA("VehicleSeat") and r then
+                        local dist = (d.Position - r.Position).Magnitude
+                        if dist < 600 then
+                            n = n + 1
+                            local model = d.Parent
+                            local at = {}
+                            pcall(function() for k, v in pairs(model:GetAttributes()) do at[#at + 1] = k .. "=" .. tostring(v) end end)
+                            log(string.format("ship seat: %s | %.0f away @ %.0f,%.0f,%.0f | max %s | occupant %s | attrs %s", d:GetFullName():sub(-70), dist,
+                                d.Position.X, d.Position.Y, d.Position.Z, tostring(d.MaxSpeed), tostring(d.Occupant ~= nil), table.concat(at, " "):sub(1, 120)))
+                            if n >= 8 then break end
+                        end
+                    end
+                end
+                log("ship: " .. n .. " vehicle seats within 600")
+            end)
         elseif cmd == "reset" then
             -- owner allowed it (20:45): when the character is wedged, reset it the way the Roblox menu does
             -- (health to 0 on our own Humanoid) and let the game respawn it at the spawn point
