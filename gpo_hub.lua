@@ -3,14 +3,20 @@
 -- Lua 5.1 only. Every callback runs in pcall. Fires no game remotes: the Impel Down part walks, presses
 -- proximity prompts and swings the held tool like a player. Settings in Workspace/gpohub/config.json.
 
+-- Grand Piece Online only (GameId 648454481). The loader sits in the executor's autoexec so the hub comes back
+-- after a rejoin; in any other game (the owner also plays Anime Adventures on this PC) it does nothing at all.
+if game.GameId ~= 648454481 then return end
+
 local G = (getgenv and getgenv()) or _G
 if G.__gpo_hub_stop then pcall(G.__gpo_hub_stop) end
 
 local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
+if not game:IsLoaded() then pcall(function() game.Loaded:Wait() end) end
 local LP = Players.LocalPlayer
+while not LP do task.wait(0.2) LP = Players.LocalPlayer end
 local FOLDER = "gpohub"
-local VERSION = "air_3"
+local VERSION = "ae_1"
 
 -- Every thread the hub starts runs inside pcall. The game's anti-cheat listens to ScriptContext.Error and sends the
 -- text of errors from scripts that are not its own to the server (read in the decompiled "anti" module), so an
