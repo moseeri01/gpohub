@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "m_2"
+local VERSION = "m_3"
 
 local F = {
     alive = true,
@@ -29,7 +29,7 @@ local F = {
         -- Impel Down
         idDiff = "Nightmare", idSolo = true, idSecret = true, idRequeue = true, idBuy = "Nothing", idKeep = 200000,
         mobNames = "", mobRange = 80, mobSkills = false, fruitAlert = true,
-        idCuffs = true, idChests = true, idLoot = true, idSkipJunk = true, idFight = true, idFightRange = 40, idSkills = false, idBosses = false, idMaze = true,
+        idCuffs = true, idChests = true, idLoot = true, idSkipJunk = true, idFight = true, idFightRange = 40, idSkills = false, idBosses = false, idMaze = true, idGoPad = true,
         -- Boss
         bossHop = false, bossList = { Juzo = true },
         bossRadiant = false, bossRoger = false, bossHawk = false,
@@ -623,7 +623,7 @@ end)
 -- Queue, difficulty vote, maze route, the end of the run and dying are NOT handled (never recorded).
 --------------------------------------------------------------------------------
 do
-    local ID = { PLACE = 11424731604, prompts = {}, stage = "-", done = { chests = 0, loot = 0, keys = 0 } }
+    local ID = { PLACE = 11424731604, WORLD = 7465136166, PAD = Vector3.new(5876, 9.6, -10213),prompts = {}, stage = "-", done = { chests = 0, loot = 0, keys = 0 } }
     F.impel = ID
     local JUNK = { ["Wooden Plank"] = true }
     function ID.inRaid() return game.PlaceId == ID.PLACE end
@@ -818,7 +818,21 @@ do
         while F.alive do
             if F.running and F.cfg.mode == "Impel Down" then
                 if not ID.inRaid() then
-                    F.status = "Not in Impel Down - queue and pick the difficulty by hand"
+                    -- raid pad at Impel Base (main sea place): both recorded hand runs ended at 5876,9.6,-10213 just
+                    -- before the teleport into the raid. Walk there (no teleport: the server tracks teleports).
+                    local r = C.root()
+                    local d = r and (r.Position - ID.PAD).Magnitude
+                    if not (F.cfg.idGoPad and game.PlaceId == ID.WORLD and d and C.alive()) then
+                        F.status = "Not in Impel Down - queue and pick the difficulty by hand"
+                    elseif d <= 6 then
+                        F.status = "On the raid pad - waiting for the raid (pick the difficulty by hand)"
+                    elseif d > 1500 then
+                        F.status = "Raid pad is far (" .. math.floor(d) .. ") - set spawn at Impel Base (Robo) first"
+                    else
+                        F.status = "Walking to the raid pad (" .. math.floor(d) .. ")"
+                        if not ID.padLogged then ID.padLogged = true log("impel: walking to the raid pad, " .. math.floor(d) .. " away") end
+                        pcall(C.walkTo, ID.PAD, 4, 40)
+                    end
                 elseif C.alive() then
                     local ok, err = pcall(step)
                     if not ok then log("impel error: " .. tostring(err)) end
@@ -1355,6 +1369,7 @@ UI.info(idst, "Hit method", function()
 end)
 UI.info(idst, "Press method", function() return type(fireproximityprompt) == "function" and "fireproximityprompt" or "hold E" end)
 local raid = UI.card(impel, 1, "Raid")
+UI.toggle(raid, "Walk to the raid pad (works now)", cfgGet("idGoPad"), cfgSet("idGoPad"))
 UI.choice(raid, "Difficulty", { "Normal", "Hard", "Nightmare", "Nightmare+" }, cfgGet("idDiff"), cfgSet("idDiff"))
 UI.toggle(raid, "Solo only", cfgGet("idSolo"), cfgSet("idSolo"))
 UI.toggle(raid, "Open Secret Room (floor 2)", cfgGet("idSecret"), cfgSet("idSecret"))
