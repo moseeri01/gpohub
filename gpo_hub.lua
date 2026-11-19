@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "m_4"
+local VERSION = "m_5"
 
 local F = {
     alive = true,
@@ -527,36 +527,54 @@ do
     local SKILL_KEYS = { Enum.KeyCode.Z, Enum.KeyCode.X, Enum.KeyCode.C }
     local lastSkill, skillN = 0, 0
 
-    -- M1 has two ways. The game's swing call comes from Backpack.MeleeScript (recorded), so tool:Activate()
-    -- may do nothing; the hub keeps whichever way shows damage (target hp or leaderstats.Damage) and logs it.
-    local ATK = { method = 1, names = { "tool:Activate", "mouse click" }, mark = nil, proven = false, tries = 0 }
+    -- M1 has three ways (tool:Activate, an injected mouse click, the executor s own mouse1click). The game s swing
+    -- call comes from Backpack.MeleeScript (recorded). First live raid (m_2): 5 s of Activate and of clicks showed no
+    -- damage, with no way to tell "no swing" from "swing out of reach". So now two proofs are kept apart:
+    --   swing  = the character s M1 attributes change (M1DashRecoverySwingId / LastLandedM1SwingId, seen in records)
+    --   damage = target hp drops or leaderstats.Damage rises
+    -- A way that swings is kept and the hub steps closer; a way that does not swing is swapped after 4 s.
+    local ATK = { method = 1, names = { "tool:Activate", "mouse click", "mouse1click" }, mark = nil, proven = false, swings = false, tries = 0, reach = 5 }
     C.atk = ATK
     local function dmgStat()
         local ls = LP:FindFirstChild("leaderstats")
         local d = ls and ls:FindFirstChild("Damage")
         return d and tonumber(d.Value) or 0
     end
-    -- a screen point for the click that is not on the hub window
+    local function swingMark()
+        local c = LP.Character
+        if not c then return "" end
+        return tostring(c:GetAttribute("M1DashRecoverySwingId")) .. "|" .. tostring(c:GetAttribute("LastLandedM1SwingId"))
+    end
+    -- a screen point for the click that is not on the hub window (screen centre first: the game aims with the mouse)
+    local SPOTS = { { 0.5, 0.5 }, { 0.5, 0.3 }, { 0.3, 0.5 }, { 0.7, 0.5 }, { 0.15, 0.35 }, { 0.85, 0.35 } }
     local function clickPoint()
         local cam = workspace.CurrentCamera
         local v = cam and cam.ViewportSize or Vector2.new(1280, 720)
-        local x, y = 24, v.Y * 0.5
-        if win.Visible then
-            local p, s = win.AbsolutePosition, win.AbsoluteSize
-            if x >= p.X and x <= p.X + s.X and y >= p.Y and y <= p.Y + s.Y then x = v.X - 24 end
+        for _, sp in ipairs(SPOTS) do
+            local x, y = v.X * sp[1], v.Y * sp[2]
+            local onWin = false
+            if win.Visible then
+                local p, sz = win.AbsolutePosition, win.AbsoluteSize
+                onWin = x >= p.X - 20 and x <= p.X + sz.X + 20 and y >= p.Y - 60 and y <= p.Y + sz.Y + 60
+            end
+            if not onWin then return x, y end
         end
-        return x, y
+        return 30, v.Y * 0.35
     end
     local function swing(tool)
         if ATK.method == 1 then
             if tool then pcall(function() tool:Activate() end) end
-        elseif VIM then
+        elseif ATK.method == 2 then
+            if not VIM then return end
             local x, y = clickPoint()
             pcall(function()
+                VIM:SendMouseMoveEvent(x, y, game)
                 VIM:SendMouseButtonEvent(x, y, 0, true, game, 0)
                 task.wait(0.05)
                 VIM:SendMouseButtonEvent(x, y, 0, false, game, 0)
             end)
+        elseif type(mouse1click) == "function" then
+            pcall(mouse1click)
         end
     end
     -- turn on the spot to face pos (position unchanged)
@@ -581,31 +599,50 @@ do
         if not hr or not h then return end
         F.status = "Fighting " .. m.Name .. " (" .. math.floor(h.Health) .. " hp)"
         local r = C.root()
-        if r and (hr.Position - r.Position).Magnitude > 6 then
-            C.walkTo(hr.Position, 5, 4, function() return h.Health <= 0 end)
+        if r and (hr.Position - r.Position).Magnitude > ATK.reach + 1 then
+            C.walkTo(hr.Position, ATK.reach, 4, function() return h.Health <= 0 end)
         end
         r = C.root()
-        local close = r ~= nil and (hr.Position - r.Position).Magnitude <= 9
+        local dist = r and (hr.Position - r.Position).Magnitude or 999
+        local close = dist <= 9
         face(hr.Position)
         local tool = C.holdWeapon()
         if close then
-            if ATK.mark == nil or ATK.mark.m ~= m then ATK.mark = { m = m, hp = h.Health, dmg = dmgStat(), t = os.clock() } end
-            if h.Health < ATK.mark.hp - 0.5 or dmgStat() > ATK.mark.dmg then
+            local mk = ATK.mark
+            if mk == nil or mk.m ~= m then
+                mk = { m = m, hp = h.Health, dmg = dmgStat(), sw = swingMark(), t = os.clock(), swung = false }
+                ATK.mark = mk
+            end
+            if swingMark() ~= mk.sw then
+                mk.swung = true
+                if not ATK.swings then
+                    ATK.swings = true
+                    log("swing seen with " .. ATK.names[ATK.method])
+                end
+            end
+            if h.Health < mk.hp - 0.5 or dmgStat() > mk.dmg then
                 if not ATK.proven then
                     ATK.proven = true
-                    log("attack works: " .. ATK.names[ATK.method])
+                    log(string.format("attack works: %s (dist %.1f, tool %s)", ATK.names[ATK.method], dist, tool and tool.Name or "none"))
                 end
-                ATK.mark = { m = m, hp = h.Health, dmg = dmgStat(), t = os.clock() }
-            elseif not ATK.proven and os.clock() - ATK.mark.t > 5 then
-                ATK.method = ATK.method % 2 + 1
-                ATK.tries = ATK.tries + 1
                 ATK.mark = nil
-                log("no damage in 5 s - attack method now: " .. ATK.names[ATK.method])
+            elseif not ATK.proven and os.clock() - mk.t > 4 then
+                local what = string.format("dist %.1f, tool %s, target hp %.0f", dist, tool and tool.Name or "none", h.Health)
+                if mk.swung then
+                    -- it swings but nothing lands: stand closer instead of changing the way
+                    ATK.reach = math.max(2.5, ATK.reach - 1)
+                    log("swings but no damage in 4 s (" .. what .. ") - reach now " .. ATK.reach)
+                else
+                    ATK.method = ATK.method % #ATK.names + 1
+                    ATK.tries = ATK.tries + 1
+                    log("no swing in 4 s with the last way (" .. what .. ") - now: " .. ATK.names[ATK.method])
+                end
+                ATK.mark = nil
             end
         end
         swing(tool)
-        -- no skills until a swing way is proven (or both were tried), so the proof is not a skill's damage
-        if useSkills and close and (ATK.proven or ATK.tries >= 2) and os.clock() - lastSkill > 4 then
+        -- no skills until a swing way is proven (or every way was tried), so the proof is not a skill s damage
+        if useSkills and close and (ATK.proven or ATK.tries >= #ATK.names) and os.clock() - lastSkill > 4 then
             lastSkill = os.clock()
             skillN = skillN % #SKILL_KEYS + 1
             aim(hr.Position)
@@ -681,7 +718,8 @@ do
         if not r then return nil end
         local best, bestD = nil, maxDist
         for p in pairs(ID.prompts) do
-            if p.Parent and p.Enabled and kindOf(p) == want then
+            local again = ID.pressed[p]
+            if p.Parent and p.Enabled and kindOf(p) == want and not (again and os.clock() - again < 8) then
                 local pos = C.promptPos(p)
                 local d = pos and (pos - r.Position).Magnitude
                 if d and d < bestD then best, bestD = p, d end
@@ -691,6 +729,15 @@ do
     end
     -- other enemies recorded in the raid: Blugori, Kelvin, Santa, Kramprus, Snow Wolf (bosses / event) - only with the switch
     ID.KEYSPOT = Vector3.new(3026.3, 2075.9, -13411.0)
+    -- a pressed prompt is left alone for 8 s (m_2 pressed the same chest several times) and counted once
+    ID.pressed = setmetatable({}, { __mode = "k" })
+    local function use(p, what, counter)
+        local first = ID.pressed[p] == nil
+        if C.usePrompt(p, what) then
+            ID.pressed[p] = os.clock()
+            if first then ID.done[counter] = ID.done[counter] + 1 end
+        end
+    end
     function ID.count() local n = 0 for _ in pairs(ID.prompts) do n = n + 1 end return n end
     local function isGuard(m) return F.cfg.idBosses or m.Name == "Impel Guard" end
 
@@ -804,7 +851,7 @@ do
         local c = C.char()
         if c and c:FindFirstChild("Cuffed") and F.cfg.idCuffs then
             local p = nearestPrompt("key", 1000)
-            if p then if C.usePrompt(p, "key") then ID.done.keys = ID.done.keys + 1 end return end
+            if p then use(p, "key", "keys") return end
             -- the key is not loaded yet (the game streams in nearby things only): go where it lay in the recorded
             -- run (3026,2076,-13411); if it is not there either, say so and wait for the owner
             local r = C.root()
@@ -827,12 +874,12 @@ do
         end
         if F.cfg.idLoot then
             local p = nearestPrompt("loot", 120)
-            if p then if C.usePrompt(p, "drop") then ID.done.loot = ID.done.loot + 1 end return end
+            if p then use(p, "drop", "loot") return end
         end
         if F.cfg.idChests then
             -- in the maze only chests close by, or the walk to each one fights the walls
             local p = nearestPrompt("chest", (F.cfg.idMaze and ID.inMaze()) and 60 or 300)
-            if p then if C.usePrompt(p, "chest") then ID.done.chests = ID.done.chests + 1 end return end
+            if p then use(p, "chest", "chests") return end
         end
         if F.cfg.idMaze and ID.inMaze() then mazeStep() return end
         F.status = "Nothing near - walk on by hand (stage: " .. ID.stage .. ")"
