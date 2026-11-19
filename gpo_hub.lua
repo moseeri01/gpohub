@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "w_2"
+local VERSION = "id_3"
 
 local F = {
     alive = true,
@@ -29,7 +29,7 @@ local F = {
         -- Impel Down
         idDiff = "Nightmare", idSolo = true, idSecret = true, idRequeue = true, idBuy = "Nothing", idKeep = 200000,
         mobNames = "", mobRange = 80, mobSkills = false, fruitAlert = true,
-        idCuffs = true, idChests = true, idLoot = true, idSkipJunk = true, idFight = true, idFightRange = 40, idSkills = false,
+        idCuffs = true, idChests = true, idLoot = true, idSkipJunk = true, idFight = true, idFightRange = 40, idSkills = false, idBosses = false,
         -- Boss
         bossHop = false, bossList = { Juzo = true },
         bossRadiant = false, bossRoger = false, bossHawk = false,
@@ -514,7 +514,56 @@ do
 
     local SKILL_KEYS = { Enum.KeyCode.Z, Enum.KeyCode.X, Enum.KeyCode.C }
     local lastSkill, skillN = 0, 0
-    -- one attack beat on a mob: close in, swing, maybe a skill
+
+    -- M1 has two ways. The game's swing call comes from Backpack.MeleeScript (recorded), so tool:Activate()
+    -- may do nothing; the hub keeps whichever way shows damage (target hp or leaderstats.Damage) and logs it.
+    local ATK = { method = 1, names = { "tool:Activate", "mouse click" }, mark = nil, proven = false, tries = 0 }
+    C.atk = ATK
+    local function dmgStat()
+        local ls = LP:FindFirstChild("leaderstats")
+        local d = ls and ls:FindFirstChild("Damage")
+        return d and tonumber(d.Value) or 0
+    end
+    -- a screen point for the click that is not on the hub window
+    local function clickPoint()
+        local cam = workspace.CurrentCamera
+        local v = cam and cam.ViewportSize or Vector2.new(1280, 720)
+        local x, y = 24, v.Y * 0.5
+        if win.Visible then
+            local p, s = win.AbsolutePosition, win.AbsoluteSize
+            if x >= p.X and x <= p.X + s.X and y >= p.Y and y <= p.Y + s.Y then x = v.X - 24 end
+        end
+        return x, y
+    end
+    local function swing(tool)
+        if ATK.method == 1 then
+            if tool then pcall(function() tool:Activate() end) end
+        elseif VIM then
+            local x, y = clickPoint()
+            pcall(function()
+                VIM:SendMouseButtonEvent(x, y, 0, true, game, 0)
+                task.wait(0.05)
+                VIM:SendMouseButtonEvent(x, y, 0, false, game, 0)
+            end)
+        end
+    end
+    -- turn on the spot to face pos (position unchanged)
+    local function face(pos)
+        local r = C.root()
+        if not r then return end
+        local flat = Vector3.new(pos.X, r.Position.Y, pos.Z)
+        if (flat - r.Position).Magnitude > 0.5 then pcall(function() r.CFrame = CFrame.lookAt(r.Position, flat) end) end
+    end
+    -- skills send the aim CFrame from the client (recorded), so point the camera and mouse at the target first
+    local function aim(pos)
+        pcall(function()
+            local cam = workspace.CurrentCamera
+            cam.CFrame = CFrame.lookAt(cam.CFrame.Position, pos)
+            if VIM then VIM:SendMouseMoveEvent(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2, game) end
+        end)
+    end
+
+    -- one attack beat on a mob: close in, face it, swing, maybe a skill
     function C.attack(m, useSkills)
         local hr, h = m:FindFirstChild("HumanoidRootPart"), m:FindFirstChildOfClass("Humanoid")
         if not hr or not h then return end
@@ -523,11 +572,31 @@ do
         if r and (hr.Position - r.Position).Magnitude > 6 then
             C.walkTo(hr.Position, 5, 4, function() return h.Health <= 0 end)
         end
+        r = C.root()
+        local close = r ~= nil and (hr.Position - r.Position).Magnitude <= 9
+        face(hr.Position)
         local tool = C.holdWeapon()
-        if tool then pcall(function() tool:Activate() end) end
-        if useSkills and os.clock() - lastSkill > 4 then
+        if close then
+            if ATK.mark == nil or ATK.mark.m ~= m then ATK.mark = { m = m, hp = h.Health, dmg = dmgStat(), t = os.clock() } end
+            if h.Health < ATK.mark.hp - 0.5 or dmgStat() > ATK.mark.dmg then
+                if not ATK.proven then
+                    ATK.proven = true
+                    log("attack works: " .. ATK.names[ATK.method])
+                end
+                ATK.mark = { m = m, hp = h.Health, dmg = dmgStat(), t = os.clock() }
+            elseif not ATK.proven and os.clock() - ATK.mark.t > 5 then
+                ATK.method = ATK.method % 2 + 1
+                ATK.tries = ATK.tries + 1
+                ATK.mark = nil
+                log("no damage in 5 s - attack method now: " .. ATK.names[ATK.method])
+            end
+        end
+        swing(tool)
+        -- no skills until a swing way is proven (or both were tried), so the proof is not a skill's damage
+        if useSkills and close and (ATK.proven or ATK.tries >= 2) and os.clock() - lastSkill > 4 then
             lastSkill = os.clock()
             skillN = skillN % #SKILL_KEYS + 1
+            aim(hr.Position)
             C.key(SKILL_KEYS[skillN])
         end
         task.wait(0.25)
@@ -607,7 +676,8 @@ do
         end
         return best
     end
-    local function isGuard(m) return m.Name == "Impel Guard" end
+    -- other enemies recorded in the raid: Blugori, Kelvin, Santa, Kramprus, Snow Wolf (bosses / event) - only with the switch
+    local function isGuard(m) return F.cfg.idBosses or m.Name == "Impel Guard" end
 
     local function step()
         local c = C.char()
@@ -858,10 +928,15 @@ UI.toggle(idnow, "Skip Wooden Plank", cfgGet("idSkipJunk"), cfgSet("idSkipJunk")
 UI.toggle(idnow, "Fight Impel Guards", cfgGet("idFight"), cfgSet("idFight"))
 UI.stepper(idnow, "Fight guards within", 10, 120, cfgGet("idFightRange"), cfgSet("idFightRange"), 10)
 UI.toggle(idnow, "Use skills Z / X / C", cfgGet("idSkills"), cfgSet("idSkills"))
+UI.toggle(idnow, "Fight every enemy (bosses too)", cfgGet("idBosses"), cfgSet("idBosses"))
 UI.note(idnow, "Home: Mode Impel Down + Start. Walks only. Queue, maze route and the end are still by hand.")
 local idst = UI.card(impel, 2, "This run")
 UI.info(idst, "Stage", function() return F.impel and F.impel.stage or "-" end)
 UI.info(idst, "Chests / drops", function() return F.impel and (F.impel.done.chests .. " / " .. F.impel.done.loot) or "-" end)
+UI.info(idst, "Hit method", function()
+    local a = F.core and F.core.atk
+    return a and (a.names[a.method] .. (a.proven and " (works)" or " (not proven)")) or "-"
+end)
 UI.info(idst, "Press method", function() return type(fireproximityprompt) == "function" and "fireproximityprompt" or "hold E" end)
 local raid = UI.card(impel, 1, "Raid")
 UI.choice(raid, "Difficulty", { "Normal", "Hard", "Nightmare", "Nightmare+" }, cfgGet("idDiff"), cfgSet("idDiff"))
