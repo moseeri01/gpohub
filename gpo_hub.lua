@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "m_16"
+local VERSION = "m_17"
 
 -- Every thread the hub starts runs inside pcall. The game's anti-cheat listens to ScriptContext.Error and sends the
 -- text of errors from scripts that are not its own to the server (read in the decompiled "anti" module), so an
@@ -1697,8 +1697,14 @@ do
                 log("remote: goto " .. rest)
             end
         elseif cmd == "reload" then
-            log("remote: reload")
-            local ok, src = pcall(function() return game:HttpGet(LOADER .. "?t=" .. tostring(os.time())) end)
+            -- "reload <commit>" loads that exact commit of the public repo: the plain main URL is cached by GitHub
+            -- for about 5 minutes (a ?t= suffix does not skip it - seen 20:26, m_15 came back after m_16 was pushed)
+            local url = LOADER .. "?t=" .. tostring(os.time())
+            if rest:match("^[0-9a-f]+$") and #rest >= 7 and #rest <= 40 then
+                url = "https://raw.githubusercontent.com/moseeri01/gpohub/" .. rest .. "/gpo_hub.lua"
+            end
+            log("remote: reload " .. rest)
+            local ok, src = pcall(function() return game:HttpGet(url) end)
             local fn = ok and type(src) == "string" and #src > 1000 and loadstring(src) or nil
             if fn then task.spawn(fn) else log("remote: reload failed") end
         else
