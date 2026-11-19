@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "s_2"
+local VERSION = "m_1"
 
 local F = {
     alive = true,
@@ -29,7 +29,7 @@ local F = {
         -- Impel Down
         idDiff = "Nightmare", idSolo = true, idSecret = true, idRequeue = true, idBuy = "Nothing", idKeep = 200000,
         mobNames = "", mobRange = 80, mobSkills = false, fruitAlert = true,
-        idCuffs = true, idChests = true, idLoot = true, idSkipJunk = true, idFight = true, idFightRange = 40, idSkills = false, idBosses = false,
+        idCuffs = true, idChests = true, idLoot = true, idSkipJunk = true, idFight = true, idFightRange = 40, idSkills = false, idBosses = false, idMaze = true,
         -- Boss
         bossHop = false, bossList = { Juzo = true },
         bossRadiant = false, bossRoger = false, bossHawk = false,
@@ -680,6 +680,112 @@ do
     -- other enemies recorded in the raid: Blugori, Kelvin, Santa, Kramprus, Snow Wolf (bosses / event) - only with the switch
     local function isGuard(m) return F.cfg.idBosses or m.Name == "Impel Guard" end
 
+    -- maze (m_1). Floor 1 maze = a 75-stud grid: in the recorded run chests and corridor centre lines sit on
+    -- x = 2540.1 + 75i, z = -14214 - 75j, and "END OF MAZE REACHED" came at 2990,-15281. Owner: walls change every
+    -- run, the way out stays. So: search as we go - at each grid point rays tell which of the 4 neighbours are
+    -- open, take the unvisited one nearest the exit, back up at dead ends. Walking only (server checks noclip / fly).
+    local MZ = { X0 = 2540.1, Z0 = -14214, STEP = 75, exit = Vector3.new(2990.1, 2075.7, -15281),
+        visited = {}, bad = {}, stack = {}, hops = 0, fails = 0, gaveUp = false }
+    ID.maze = MZ
+    local DIRS = { { 0, 1 }, { 1, 0 }, { -1, 0 }, { 0, -1 } }   -- +j runs toward the exit (-Z)
+    local function nodeOf(pos) return math.floor((pos.X - MZ.X0) / MZ.STEP + 0.5), math.floor((MZ.Z0 - pos.Z) / MZ.STEP + 0.5) end
+    local function nodePos(i, j, y) return Vector3.new(MZ.X0 + i * MZ.STEP, y, MZ.Z0 - j * MZ.STEP) end
+    local function nkey(i, j) return i .. "," .. j end
+    local rayParams = nil
+    -- nothing solid between two points (see-through / walk-through parts are skipped)
+    local function clear(from, to)
+        if not rayParams then
+            rayParams = RaycastParams.new()
+            rayParams.FilterType = Enum.RaycastFilterType.Exclude
+        end
+        local ignore = { C.char() }
+        for _, n in ipairs({ "Effects", "NPCs", "PlayerCharacters", "Projectiles", "Ragdolls" }) do
+            local f = workspace:FindFirstChild(n)
+            if f then ignore[#ignore + 1] = f end
+        end
+        rayParams.FilterDescendantsInstances = ignore
+        local origin = from
+        for _ = 1, 6 do
+            local dir = to - origin
+            if dir.Magnitude < 1 then return true end
+            local hit = workspace:Raycast(origin, dir, rayParams)
+            if not hit then return true end
+            if hit.Instance.CanCollide then return false end
+            origin = hit.Position + dir.Unit * 0.2
+        end
+        return false
+    end
+    function ID.inMaze()
+        if ID.stage:find("END OF MAZE", 1, true) then return false end
+        if ID.stage:find("MAZE", 1, true) then return true end
+        local r = C.root()   -- hub loaded mid-run: no stage text yet, go by the recorded maze area
+        if ID.stage ~= "-" or not r then return false end
+        local p = r.Position
+        return p.Z < -14030 and p.Z > -15290 and p.X > 2500 and p.X < 3560
+    end
+    local function mazeStep()
+        local r = C.root()
+        if not r or MZ.gaveUp then
+            if MZ.gaveUp then F.status = "Maze: no way found - walk by hand" end
+            return
+        end
+        local y = r.Position.Y
+        local i, j = nodeOf(r.Position)
+        local k = nkey(i, j)
+        local here = nodePos(i, j, y)
+        local ei, ej = nodeOf(MZ.exit)
+        if i == ei and j >= ej then
+            F.status = "Maze: last steps to the exit"
+            C.walkTo(Vector3.new(MZ.exit.X, y, MZ.exit.Z - 20), 4, 15)
+            return
+        end
+        if (r.Position - here).Magnitude > 8 then
+            F.status = "Maze: to grid point " .. k
+            if not C.walkTo(here, 4, 12) then
+                MZ.fails = MZ.fails + 1
+                if MZ.fails >= 6 then MZ.gaveUp = true log("maze: cannot reach grid point " .. k .. " - gave up") end
+            end
+            return
+        end
+        MZ.fails = 0
+        MZ.visited[k] = true
+        if MZ.stack[#MZ.stack] ~= k then MZ.stack[#MZ.stack + 1] = k end
+        local best, bestD, openTxt = nil, math.huge, ""
+        for _, d in ipairs(DIRS) do
+            local ni, nj = i + d[1], j + d[2]
+            local nk = nkey(ni, nj)
+            local np = nodePos(ni, nj, y)
+            if not MZ.bad[k .. ">" .. nk] and clear(r.Position, np) then
+                openTxt = openTxt .. " " .. nk
+                if not MZ.visited[nk] then
+                    local dist = math.abs(ni - ei) + math.abs(nj - ej)
+                    if dist < bestD then best, bestD = { nk, np }, dist end
+                end
+            end
+        end
+        MZ.hops = MZ.hops + 1
+        if best then
+            F.status = "Maze: " .. k .. " -> " .. best[1]
+            log("maze " .. k .. " open:" .. openTxt .. " go " .. best[1])
+            if not C.walkTo(best[2], 4, 15) then
+                MZ.bad[k .. ">" .. best[1]] = true
+                log("maze: could not reach " .. best[1])
+            end
+            return
+        end
+        table.remove(MZ.stack)   -- dead end: one point back
+        local prev = MZ.stack[#MZ.stack]
+        if not prev then
+            MZ.gaveUp = true
+            log("maze: search ran out at " .. k .. " open:" .. openTxt)
+            return
+        end
+        local pi, pj = prev:match("^(-?%d+),(-?%d+)$")
+        F.status = "Maze: dead end at " .. k .. ", back to " .. prev
+        log("maze dead end " .. k .. " back " .. prev)
+        C.walkTo(nodePos(tonumber(pi), tonumber(pj), y), 4, 15)
+    end
+
     local function step()
         local c = C.char()
         if c and c:FindFirstChild("Cuffed") and F.cfg.idCuffs then
@@ -700,9 +806,11 @@ do
             if p then if C.usePrompt(p, "drop") then ID.done.loot = ID.done.loot + 1 end return end
         end
         if F.cfg.idChests then
-            local p = nearestPrompt("chest", 300)
+            -- in the maze only chests close by, or the walk to each one fights the walls
+            local p = nearestPrompt("chest", (F.cfg.idMaze and ID.inMaze()) and 60 or 300)
             if p then if C.usePrompt(p, "chest") then ID.done.chests = ID.done.chests + 1 end return end
         end
+        if F.cfg.idMaze and ID.inMaze() then mazeStep() return end
         F.status = "Nothing near - walk on by hand (stage: " .. ID.stage .. ")"
     end
 
@@ -1169,10 +1277,16 @@ UI.toggle(idnow, "Fight Impel Guards", cfgGet("idFight"), cfgSet("idFight"))
 UI.stepper(idnow, "Fight guards within", 10, 120, cfgGet("idFightRange"), cfgSet("idFightRange"), 10)
 UI.toggle(idnow, "Use skills Z / X / C", cfgGet("idSkills"), cfgSet("idSkills"))
 UI.toggle(idnow, "Fight every enemy (bosses too)", cfgGet("idBosses"), cfgSet("idBosses"))
+UI.toggle(idnow, "Walk the maze (floor 1)", cfgGet("idMaze"), cfgSet("idMaze"))
 UI.note(idnow, "Home: Mode Impel Down + Start. Walks only. Queue, maze route and the end are still by hand.")
 local idst = UI.card(impel, 2, "This run")
 UI.info(idst, "Stage", function() return F.impel and F.impel.stage or "-" end)
 UI.info(idst, "Chests / drops", function() return F.impel and (F.impel.done.chests .. " / " .. F.impel.done.loot) or "-" end)
+UI.info(idst, "Maze", function()
+    local m = F.impel and F.impel.maze
+    if not m then return "-" end
+    return m.gaveUp and "gave up - walk by hand" or (m.hops .. " grid points")
+end)
 UI.info(idst, "Hit method", function()
     local a = F.core and F.core.atk
     return a and (a.names[a.method] .. (a.proven and " (works)" or " (not proven)")) or "-"
