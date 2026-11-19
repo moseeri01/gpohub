@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "m_20"
+local VERSION = "m_21"
 
 -- Every thread the hub starts runs inside pcall. The game's anti-cheat listens to ScriptContext.Error and sends the
 -- text of errors from scripts that are not its own to the server (read in the decompiled "anti" module), so an
@@ -471,13 +471,27 @@ do
         end)
     end
 
+    -- A Seat on the way makes the character sit down and every walk stops (loop tick 20:38: state "Seated" at
+    -- 5953,12,-10132 on the pad route - it jumped off, touched the seat and sat again, for minutes). While the hub
+    -- walks, sitting is switched off on our own Humanoid and switched back on afterwards.
+    function C.noSit(on)
+        local h = C.hum()
+        if not h then return end
+        pcall(function()
+            if on and h.Sit then h.Sit = false end
+            h:SetStateEnabled(Enum.HumanoidStateType.Seated, not on)
+        end)
+    end
+
     -- walk to pos; false on timeout, stuck, stop() or Start turned off. Long walks sprint (Settings).
     function C.walkTo(pos, near, limit, stop)
+        C.noSit(true)
         local r0 = C.root()
         C.wantSprint = (F.cfg.sprint and r0 ~= nil and (r0.Position - pos).Magnitude > 30) or false
         local ok, res = pcall(C.walkInner, pos, near, limit, stop)
         C.wantSprint = false
         C.sprint(false)
+        C.noSit(false)
         return ok and res or false
     end
     function C.walkInner(pos, near, limit, stop)
@@ -635,6 +649,7 @@ do
         end
         if first < #points then first = first + 1 end   -- the nearest point may be behind us
         C.wantSprint = F.cfg.sprint and true or false
+        C.noSit(true)
         local ok = true
         for i = first, #points do
             if not C.walkStraight(points[i], i == #points and (near or 4) or 6, 14) then
@@ -649,6 +664,7 @@ do
         end
         C.wantSprint = false
         C.sprint(false)
+        C.noSit(false)
         return ok
     end
 
