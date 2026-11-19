@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "m_14"
+local VERSION = "m_15"
 
 -- Every thread the hub starts runs inside pcall. The game's anti-cheat listens to ScriptContext.Error and sends the
 -- text of errors from scripts that are not its own to the server (read in the decompiled "anti" module), so an
@@ -1634,6 +1634,139 @@ do
                 end
             end
             task.wait(0.2)
+        end
+    end)
+end
+
+--------------------------------------------------------------------------------
+-- remote (r_1, 2026-11-19): lets the owner's assistant test without the owner clicking. Local files only:
+--   gpohub/cmd.txt   : one command per line, read every 2 s and then emptied
+--       start | stop | reload | mode <Mode name> | set <cfgKey> <value> | goto <x> <y> <z> | cancel
+--   gpohub/state.json: written every 2 s - version, status, position, hp, nearby mobs, hit method
+-- Nothing here talks to the game; goto uses the same walking as everything else.
+--------------------------------------------------------------------------------
+do
+    local R = { goal = nil }
+    F.remote = R
+    local CMD, STATE = FOLDER .. "/cmd.txt", FOLDER .. "/state.json"
+    local LOADER = "https://raw.githubusercontent.com/moseeri01/gpohub/main/gpo_hub.lua"
+
+    local function setCfg(key, value)
+        local cur = F.cfg[key]
+        if cur == nil then log("remote: no setting " .. tostring(key)) return end
+        if type(cur) == "boolean" then F.cfg[key] = (value == "true" or value == "on" or value == "1")
+        elseif type(cur) == "number" then F.cfg[key] = tonumber(value) or cur
+        elseif type(cur) == "string" then F.cfg[key] = value
+        else log("remote: cannot set " .. key) return end
+        saveAll()
+        log("remote: " .. key .. " = " .. tostring(F.cfg[key]))
+    end
+    local function run(line)
+        local cmd, rest = line:match("^%s*(%S+)%s*(.-)%s*$")
+        if not cmd then return end
+        cmd = cmd:lower()
+        if cmd == "start" then
+            F.running = true
+            F.status = "Starting"
+            log("remote: start " .. F.cfg.mode)
+        elseif cmd == "stop" then
+            F.running = false
+            R.goal = nil
+            F.status = "Idle"
+            log("remote: stop")
+        elseif cmd == "cancel" then
+            R.goal = nil
+        elseif cmd == "mode" and rest ~= "" then
+            F.cfg.mode = rest
+            saveAll()
+            log("remote: mode " .. rest)
+        elseif cmd == "set" then
+            local k, v = rest:match("^(%S+)%s+(.+)$")
+            if k then setCfg(k, v) end
+        elseif cmd == "goto" then
+            local x, y, z = rest:match("^(-?[%d%.]+)[%s,]+(-?[%d%.]+)[%s,]+(-?[%d%.]+)$")
+            if x then
+                R.goal = Vector3.new(tonumber(x), tonumber(y), tonumber(z))
+                F.cfg.mode = "Goto"
+                F.running = true
+                log("remote: goto " .. rest)
+            end
+        elseif cmd == "reload" then
+            log("remote: reload")
+            local ok, src = pcall(function() return game:HttpGet(LOADER .. "?t=" .. tostring(os.time())) end)
+            local fn = ok and type(src) == "string" and #src > 1000 and loadstring(src) or nil
+            if fn then task.spawn(fn) else log("remote: reload failed") end
+        else
+            log("remote: unknown command " .. line:sub(1, 60))
+        end
+    end
+
+    local function state()
+        local r, h = C.root(), C.hum()
+        local mobs = {}
+        local npcs = workspace:FindFirstChild("NPCs")
+        if npcs and r then
+            for _, m in ipairs(npcs:GetChildren()) do
+                local hr, mh = m:FindFirstChild("HumanoidRootPart"), m:FindFirstChildOfClass("Humanoid")
+                if hr and mh then
+                    local d = (hr.Position - r.Position).Magnitude
+                    if d < 600 then
+                        mobs[#mobs + 1] = { n = m.Name, d = math.floor(d), hp = math.floor(mh.Health), max = math.floor(mh.MaxHealth),
+                            mob = C.isMob(m), p = { math.floor(hr.Position.X), math.floor(hr.Position.Y), math.floor(hr.Position.Z) } }
+                    end
+                end
+            end
+            table.sort(mobs, function(a, b) return a.d < b.d end)
+            while #mobs > 25 do table.remove(mobs) end
+        end
+        local c = LP.Character
+        local a = C.atk
+        return {
+            t = os.date("%H:%M:%S"), version = VERSION, place = game.PlaceId, running = F.running, mode = F.cfg.mode, status = F.status,
+            last = F.lastAction, pos = r and { math.floor(r.Position.X), math.floor(r.Position.Y), math.floor(r.Position.Z) } or nil,
+            hp = h and math.floor(h.Health) or nil, maxhp = h and math.floor(h.MaxHealth) or nil, speed = h and h.WalkSpeed or nil,
+            floor = h and tostring(h.FloorMaterial) or nil, sprint = c and c:GetAttribute("MovementSprintActive") or false,
+            combat = c and c:FindFirstChild("inCombat") ~= nil or false, tool = c and c:FindFirstChildOfClass("Tool") and c:FindFirstChildOfClass("Tool").Name or nil,
+            atk = a and { method = a.names[a.method], proven = a.proven, swings = a.swings, reach = a.reach, can = tostring(a.can) } or nil,
+            goal = R.goal and { R.goal.X, R.goal.Y, R.goal.Z } or nil, mobs = mobs,
+        }
+    end
+
+    task.spawn(function()
+        while F.alive do
+            if canFiles then
+                pcall(function()
+                    if isfile(CMD) then
+                        local text = readfile(CMD)
+                        if text and text:match("%S") then
+                            writefile(CMD, "")
+                            for line in text:gmatch("[^\r\n]+") do run(line) end
+                        end
+                    end
+                end)
+                pcall(function() writefile(STATE, HttpService:JSONEncode(state())) end)
+            end
+            task.wait(2)
+        end
+    end)
+
+    -- goto: walk to the point in hops; ends when it is there
+    task.spawn(function()
+        while F.alive do
+            if F.running and F.cfg.mode == "Goto" and R.goal and C.alive() then
+                local r = C.root()
+                local d = r and (r.Position - R.goal).Magnitude or 0
+                if d <= 8 then
+                    log(string.format("remote: goto reached (%.0f away)", d))
+                    R.goal = nil
+                    F.running = false
+                    F.status = "Goto done"
+                else
+                    F.status = "Goto (" .. math.floor(d) .. " left)"
+                    C.walkTo(R.goal, 6, 30)
+                end
+            end
+            task.wait(0.3)
         end
     end)
 end
