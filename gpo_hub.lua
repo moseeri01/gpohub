@@ -25,7 +25,7 @@ while not LP do task.wait(0.2) LP = Players.LocalPlayer end
 task.wait(0.3)
 if G.__gpo_hub_seq ~= MY_SEQ then return end
 local FOLDER = "gpohub"
-local VERSION = "h_10"
+local VERSION = "h_11"
 
 -- Exact build. GitHub serves the main file from a cache for about 5 minutes, so a hub loaded right after a push
 -- can be an older build. gpohub/want.txt (written at push time on this PC) names the commit to run; a hub that
@@ -2530,7 +2530,16 @@ do
     local function step()
         if F.cfg.stopNearPlayer then
             local p = C.playerNear(60)
-            if p then L.state = "paused" F.status = "Paused - player " .. p.Name .. " is near" return end
+            -- h_11: a player idling at the respawn dock paused the farm for good (04:13) -> pause at most 45 s
+            if p then
+                L.pauseSince = L.pauseSince or os.clock()
+                if os.clock() - L.pauseSince < 45 then
+                    L.state = "paused" F.status = "Paused - player " .. p.Name .. " is near" return
+                end
+                if not L.pauseLogged then L.pauseLogged = true log("level: " .. p.Name .. " stays near - going on after 45 s") end
+            else
+                L.pauseSince, L.pauseLogged = nil, nil
+            end
         end
         local level = tonumber(F.session.stat("Level")) or 0
         if level <= 0 then F.status = "Level: account data not loaded yet" return end
