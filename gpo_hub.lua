@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "lv_1"
+local VERSION = "kw_1"
 
 -- Every thread the hub starts runs inside pcall. The game's anti-cheat listens to ScriptContext.Error and sends the
 -- text of errors from scripts that are not its own to the server (read in the decompiled "anti" module), so an
@@ -61,7 +61,7 @@ local F = {
         -- Level
         lvlTarget = 325, lvlQuest = true, lvlMove = true, lvlStats = "Sword / Defense", autoStats = false, lvlHaki = false, lvlBlock = false,
         -- Settings
-        normalSpeed = true, sprint = true, geppo = true, stopNearPlayer = true, antiAfk = true, autoRejoin = false,
+        normalSpeed = true, sprint = true, keyWalk = false, geppo = true, stopNearPlayer = true, antiAfk = true, autoRejoin = false,
         discordAlert = false, pickUp = false, webhook = "", bossAlert = true, bossRange = 300, bossSkills = false,
     },
 }
@@ -488,11 +488,84 @@ do
         C.noSit(true)
         local r0 = C.root()
         C.wantSprint = (F.cfg.sprint and r0 ~= nil and (r0.Position - pos).Magnitude > 30) or false
-        local ok, res = pcall(C.walkInner, pos, near, limit, stop)
+        local ok, res
+        if F.cfg.keyWalk and VIM and r0 ~= nil and (r0.Position - pos).Magnitude > 30 then
+            ok, res = pcall(C.keyWalk, pos, near or 4, limit or 20, stop)
+        else
+            ok, res = pcall(C.walkInner, pos, near, limit, stop)
+        end
         C.wantSprint = false
         C.sprint(false)
         C.noSit(false)
         return ok and res or false
+    end
+    -- Key walk (kw_1, experiment, Settings switch off by default). The game only sprints while W is really held
+    -- (Movements: double W -> Run; the AutoRun branch checks IsKeyDown(W)); Run:PC_Activate() alone left the speed
+    -- at 16. So: follow the same path, but move like a player - double-tap W, hold it, and steer by pointing the
+    -- camera at the next waypoint (the character runs camera-forward). Camera and key are put back at the end.
+    function C.keyWalk(pos, near, limit, stop)
+        local h, r = C.hum(), C.root()
+        local cam = workspace.CurrentCamera
+        if not (h and r and cam and VIM) then return false end
+        local function flat(a, b) return Vector3.new(a.X - b.X, 0, a.Z - b.Z).Magnitude end
+        local points = { pos }
+        pcall(function()
+            local path = PFS:CreatePath({ AgentRadius = 2.5, AgentHeight = 5, AgentCanJump = true, WaypointSpacing = 8 })
+            path:ComputeAsync(r.Position, pos)
+            if path.Status == Enum.PathStatus.Success then
+                points = {}
+                for _, w in ipairs(path:GetWaypoints()) do points[#points + 1] = w.Position end
+            end
+        end)
+        local function press(down) pcall(function() VIM:SendKeyEvent(down, Enum.KeyCode.W, false, game) end) end
+        local target, done, t0 = nil, false, os.clock()
+        local oldType = cam.CameraType
+        local conn = game:GetService("RunService").RenderStepped:Connect(function()
+            pcall(function()
+                local rr = C.root()
+                if not (rr and target) then return end
+                local d = Vector3.new(target.X - rr.Position.X, 0, target.Z - rr.Position.Z)
+                if d.Magnitude < 0.5 then return end
+                d = d.Unit
+                cam.CFrame = CFrame.lookAt(rr.Position - d * 14 + Vector3.new(0, 7, 0), rr.Position + d * 6)
+            end)
+        end)
+        pcall(function() cam.CameraType = Enum.CameraType.Scriptable end)
+        local okRun = pcall(function()
+            for i = 1, #points do
+                if not (i == 1 and #points > 1) then
+                    target = points[i]
+                    task.wait(0.05)
+                    if not C.keyHeld then
+                        press(true) task.wait(0.06) press(false) task.wait(0.08) press(true)
+                        C.keyHeld = true
+                    end
+                    local last, stuck = nil, 0
+                    while F.alive and F.running and C.alive() do
+                        local rr = C.root()
+                        if not rr then return end
+                        if flat(rr.Position, pos) <= near then done = true return end
+                        if flat(rr.Position, target) <= 4 then break end
+                        if os.clock() - t0 > limit or (stop and stop()) then return end
+                        task.wait(0.1)
+                        if last and flat(rr.Position, last) < 0.3 then
+                            stuck = stuck + 1
+                            if stuck >= 4 then C.jump() end
+                            if stuck >= 40 then return end
+                        else stuck = 0 end
+                        last = rr.Position
+                    end
+                end
+            end
+            local rr = C.root()
+            done = rr ~= nil and flat(rr.Position, pos) <= near + 2
+        end)
+        press(false)
+        C.keyHeld = false
+        pcall(function() conn:Disconnect() end)
+        pcall(function() cam.CameraType = oldType end)
+        if not C.keyWalkLogged then C.keyWalkLogged = true log("key walk: used (W held, camera steering)" .. (okRun and "" or " - error inside")) end
+        return done
     end
     function C.walkInner(pos, near, limit, stop)
         local h, r = C.hum(), C.root()
@@ -2633,6 +2706,7 @@ local sf = UI.card(settings, 1, "Safety")
 UI.toggle(sf, "Move at normal speed only", cfgGet("normalSpeed"), cfgSet("normalSpeed"))
 UI.toggle(sf, "Sprint on long walks (game's own run)", cfgGet("sprint"), cfgSet("sprint"))
 UI.toggle(sf, "Geppo over obstacles when stuck", cfgGet("geppo"), cfgSet("geppo"))
+UI.toggle(sf, "Key walk: hold W + steer camera (test)", cfgGet("keyWalk"), cfgSet("keyWalk"))
 UI.toggle(sf, "Stop when a player is near", cfgGet("stopNearPlayer"), cfgSet("stopNearPlayer"))
 UI.toggle(sf, "Anti AFK", cfgGet("antiAfk"), cfgSet("antiAfk"))
 UI.toggle(sf, "Auto rejoin", cfgGet("autoRejoin"), cfgSet("autoRejoin"))
