@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "sh_1"
+local VERSION = "sh_2"
 
 -- Every thread the hub starts runs inside pcall. The game's anti-cheat listens to ScriptContext.Error and sends the
 -- text of errors from scripts that are not its own to the server (read in the decompiled "anti" module), so an
@@ -1489,8 +1489,16 @@ do
     end
 
     local lastHaki = 0
+    local lastNote, lastNoteAt = "", 0
     local function onNote(text)
         if type(text) ~= "string" then return end
+        -- every message the game shows the player goes to the log (it explains refusals, e.g. why a boat did not
+        -- spawn); the same text again within 20 s is skipped
+        local plain = text:gsub("<[^>]+>", "")
+        if not plain:find("^New Item") and (plain ~= lastNote or os.clock() - lastNoteAt > 20) then
+            lastNote, lastNoteAt = plain, os.clock()
+            log("note: " .. plain:sub(1, 160))
+        end
         local rar, name = text:match("New Item <Rare=(%a+)><(.+)>")
         if rar and name then
             S.rare[rar] = (S.rare[rar] or 0) + 1
