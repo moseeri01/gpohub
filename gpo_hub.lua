@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "m_13"
+local VERSION = "m_14"
 
 -- Every thread the hub starts runs inside pcall. The game's anti-cheat listens to ScriptContext.Error and sends the
 -- text of errors from scripts that are not its own to the server (read in the decompiled "anti" module), so an
@@ -61,7 +61,7 @@ local F = {
         -- Level
         lvlTarget = 325, lvlQuest = true, lvlMove = true, lvlStats = "Sword / Defense", autoStats = false, lvlHaki = false, lvlBlock = false,
         -- Settings
-        normalSpeed = true, sprint = true, stopNearPlayer = true, antiAfk = true, autoRejoin = false,
+        normalSpeed = true, sprint = true, geppo = true, stopNearPlayer = true, antiAfk = true, autoRejoin = false,
         discordAlert = false, pickUp = false, webhook = "", bossAlert = true, bossRange = 300, bossSkills = false,
     },
 }
@@ -522,7 +522,7 @@ do
                 task.wait(0.25)
                 if (r.Position - lastPos).Magnitude < 0.5 then
                     stuck = stuck + 1
-                    if stuck >= 3 then C.jump() end
+                    if stuck >= 7 then C.overObstacle() elseif stuck >= 3 then C.jump() end
                     if stuck >= 12 then return fail("not moving for 3 s") end
                 else stuck = 0 end
                 lastPos = r.Position
@@ -551,6 +551,32 @@ do
             if h then h.Jump = true end
         end
     end
+    -- Geppo (sky walk) = the game's own move: Callbacks.Geppo:PC_Activate() while in the air pushes the character
+    -- along its move direction and up; the game grants its own jump / fly allowance for it. Needs Rokushiki /
+    -- Black Leg / Kamishiki or the skyWalk skill, stamina, not cuffed; in combat 5 in a row then 2 s on the ground
+    -- (read in the decompiled Geppo script). Used only to get over something the walk is stuck on.
+    function C.geppo()
+        local ic = C.input()
+        local g = ic and ic.Callbacks.Geppo
+        if not g then return false end
+        task.spawn(function() pcall(function() g:PC_Activate() end) end)
+        return true
+    end
+    function C.overObstacle()
+        if not F.cfg.geppo or os.clock() - (C.hopAt or 0) < 3 then return end
+        C.hopAt = os.clock()
+        C.jumpAt = 0
+        C.jump()
+        task.wait(0.3)
+        local used = 0
+        for _ = 1, 3 do
+            local h = C.hum()
+            if not h or h.FloorMaterial ~= Enum.Material.Air then break end
+            if C.geppo() then used = used + 1 end
+            task.wait(0.4)
+        end
+        if used > 0 and not C.geppoLogged then C.geppoLogged = true log("geppo: used to get over an obstacle") end
+    end
     -- straight walk to a point, no path search; jumps when it stops moving (steps, ledges)
     function C.walkStraight(pos, near, limit)
         local t0, lastPos, stuck = os.clock(), nil, 0
@@ -565,7 +591,7 @@ do
             task.wait(0.2)
             if lastPos and (r.Position - lastPos).Magnitude < 0.4 then
                 stuck = stuck + 1
-                if stuck >= 2 then C.jump() end
+                if stuck >= 6 then C.overObstacle() elseif stuck >= 2 then C.jump() end
                 if stuck >= 30 then return false end
             else stuck = 0 end
             lastPos = r.Position
@@ -1814,6 +1840,7 @@ local settings = UI.page("Settings", 8)
 local sf = UI.card(settings, 1, "Safety")
 UI.toggle(sf, "Move at normal speed only", cfgGet("normalSpeed"), cfgSet("normalSpeed"))
 UI.toggle(sf, "Sprint on long walks (game's own run)", cfgGet("sprint"), cfgSet("sprint"))
+UI.toggle(sf, "Geppo over obstacles when stuck", cfgGet("geppo"), cfgSet("geppo"))
 UI.toggle(sf, "Stop when a player is near", cfgGet("stopNearPlayer"), cfgSet("stopNearPlayer"))
 UI.toggle(sf, "Anti AFK", cfgGet("antiAfk"), cfgSet("antiAfk"))
 UI.toggle(sf, "Auto rejoin", cfgGet("autoRejoin"), cfgSet("autoRejoin"))
