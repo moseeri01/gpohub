@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "m_1"
+local VERSION = "m_2"
 
 local F = {
     alive = true,
@@ -39,7 +39,7 @@ local F = {
         -- Fishing
         fishSpot = "Rough Waters", fishBait = true, fishSell = true, fishKeepLeg = true, fishMegalodon = false,
         -- Level
-        lvlTarget = 325, lvlQuest = true, lvlMove = true, lvlStats = "Sword / Defense", lvlHaki = false, lvlBlock = false,
+        lvlTarget = 325, lvlQuest = true, lvlMove = true, lvlStats = "Sword / Defense", autoStats = false, lvlHaki = false, lvlBlock = false,
         -- Settings
         normalSpeed = true, stopNearPlayer = true, antiAfk = true, autoRejoin = false,
         discordAlert = false, pickUp = false, webhook = "", bossAlert = true, bossRange = 300, bossSkills = false,
@@ -928,6 +928,65 @@ do
         end)
     end)
 
+    -- account values: the game keeps them in ReplicatedStorage["Stats" .. name] (seen in scans and in the game's
+    -- own GameUtils.GetStatsFolder). Read only.
+    local function folder() return RS:FindFirstChild("Stats" .. LP.Name) end
+    function S.stat(name, sub)
+        local f = folder()
+        local s = f and f:FindFirstChild(sub or "Stats")
+        local v = s and s:FindFirstChild(name)
+        return v and v.Value
+    end
+    local function num(v)
+        local s = tostring(math.floor(tonumber(v) or 0))
+        local out = s:reverse():gsub("(%d%d%d)", "%1,"):reverse()
+        return (out:gsub("^,", ""))
+    end
+    function S.accountLine(which)
+        if not folder() then return "loading" end
+        if which == 1 then return "Lv " .. tostring(S.stat("Level") or "?") .. "   Peli " .. num(S.stat("Peli")) end
+        if which == 2 then return tostring(S.stat("DF") or "-") .. " / " .. tostring(S.stat("FightingStyle") or "-") .. " / " .. tostring(S.stat("Race", "Customization") or "-") end
+        if which == 3 then
+            return "Str " .. tostring(S.stat("Strength") or 0) .. "  Def " .. tostring(S.stat("Defense") or 0) .. "  Stam " .. tostring(S.stat("Stamina") or 0)
+                .. "  Swd " .. tostring(S.stat("SwordMastery") or 0) .. "  Gun " .. tostring(S.stat("GunMastery") or 0) .. "  DF " .. tostring(S.stat("DevilFruitMastery") or 0)
+        end
+        return "free points " .. tostring(S.stat("SkillPoints") or 0) .. "   Impel points " .. num(S.stat("Impel Down", "DungeonPoints"))
+    end
+
+    -- auto stat points (Level page, off by default). Same call as the game's own + button:
+    -- Events.stats:FireServer(<stat name>, nil, <amount>)  (read in the game's Statistics script). One point at a
+    -- time into the lower of the two chosen stats; stops itself if the points do not go down.
+    local SPLIT = {
+        ["Sword / Defense"] = { "SwordMastery", "Defense" },
+        ["Fruit / Defense"] = { "DevilFruitMastery", "Defense" },
+        ["Sword / Fruit"] = { "SwordMastery", "DevilFruitMastery" },
+    }
+    S.statFails = 0
+    task.spawn(function()
+        while F.alive do
+            task.wait(1.5)
+            local pair = SPLIT[F.cfg.lvlStats]
+            local sp = tonumber(S.stat("SkillPoints")) or 0
+            if F.running and F.cfg.autoStats and pair and sp > 0 and S.statFails < 5 then
+                local ev = RS:FindFirstChild("Events")
+                ev = ev and ev:FindFirstChild("stats")
+                local a, b = tonumber(S.stat(pair[1])) or 0, tonumber(S.stat(pair[2])) or 0
+                local pick = a <= b and pair[1] or pair[2]
+                if ev and ev:IsA("RemoteEvent") then
+                    pcall(function() ev:FireServer(pick, nil, 1) end)
+                    task.wait(1)
+                    if (tonumber(S.stat("SkillPoints")) or 0) < sp then
+                        S.statFails = 0
+                        log("stat point -> " .. pick)
+                    else
+                        S.statFails = S.statFails + 1
+                        if S.statFails >= 5 then log("stat points: not going down (cap or refused) - auto stat stopped") end
+                    end
+                end
+            end
+        end
+    end)
+
     -- Discord alert (Settings): Epic and better drops go to the owner's own webhook. The URL is typed into the hub
     -- and lives only in gpohub/config.json; it is never logged.
     local ALERT = { Epic = true, Legendary = true, Mythical = true }
@@ -1235,7 +1294,10 @@ UI.info(st, "Last action", function() return F.lastAction ~= "" and F.lastAction
 UI.info(st, "Version", function() return VERSION end)
 local acc = UI.card(home, 1, "Account")
 UI.info(acc, "Player", function() return LP and LP.Name or "-" end)
-UI.soon(acc, "Level / Peli")
+UI.info(acc, "Level / Peli", function() return F.session.accountLine(1) end)
+UI.info(acc, "Fruit / style / race", function() return F.session.accountLine(2) end)
+UI.info(acc, "Stats", function() return F.session.accountLine(3) end)
+UI.info(acc, "Points", function() return F.session.accountLine(4) end)
 local dr = UI.card(home, 2, "Session")
 UI.info(dr, "Raids today", function() return tostring(F.session.raids) end)
 UI.info(dr, "This raid", function() return F.session.raidLine() end)
@@ -1375,7 +1437,8 @@ local lf = UI.card(level, 1, "Level farm")
 UI.stepper(lf, "Target level", 25, 675, cfgGet("lvlTarget"), cfgSet("lvlTarget"), 25)
 UI.toggle(lf, "Auto quest", cfgGet("lvlQuest"), cfgSet("lvlQuest"))
 UI.toggle(lf, "Move island by level", cfgGet("lvlMove"), cfgSet("lvlMove"))
-UI.choice(lf, "Auto stat points", { "Off", "Sword / Defense", "Fruit / Defense", "Sword / Fruit" }, cfgGet("lvlStats"), cfgSet("lvlStats"))
+UI.toggle(lf, risk("Spend skill points (works now)", "low"), cfgGet("autoStats"), cfgSet("autoStats"))
+UI.choice(lf, "Split points", { "Sword / Defense", "Fruit / Defense", "Sword / Fruit" }, cfgGet("lvlStats"), cfgSet("lvlStats"))
 local un = UI.card(level, 2, "Unlocks")
 UI.toggle(un, "Train Armament Haki", cfgGet("lvlHaki"), cfgSet("lvlHaki"))
 UI.toggle(un, "Perfect block x200", cfgGet("lvlBlock"), cfgSet("lvlBlock"))
