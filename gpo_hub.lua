@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "g_6"
+local VERSION = "g_7"
 
 -- Every thread the hub starts runs inside pcall. The game's anti-cheat listens to ScriptContext.Error and sends the
 -- text of errors from scripts that are not its own to the server (read in the decompiled "anti" module), so an
@@ -687,14 +687,14 @@ do
         task.wait(0.3)
         return true
     end
-    function C.usePrompt(p, what)
+    function C.usePrompt(p, what, stop)
         local pos = C.promptPos(p)
         if not pos then return false end
         F.status = "Walking to " .. what .. " (" .. tostring(p.ObjectText) .. ")"
         -- stand close: 4 studs flat (range 10 minus 2 was measured flat since m_18 and left us too far in 3D -
         -- m_27: chests "pressed" but none opened, no drops)
         local reach = math.min(4, math.max(2, (p.MaxActivationDistance or 10) - 2))
-        if C.walkTo(pos, reach, 25, function() return not p.Parent end) and p.Parent then
+        if C.walkTo(pos, reach, 25, function() return not p.Parent or (stop ~= nil and stop()) end) and p.Parent then
             -- real 3D distance: the walk now measures flat, and a prompt on a ledge above / below is out of the
             -- game's range even when we stand "at" it (20:53: two chests pressed again and again, nothing opened)
             local r = C.root()
@@ -744,11 +744,29 @@ do
     -- have MeleeTool = true, fruits also devilFruit = true. The hub used to look for a tool named "Melee" only;
     -- an account with a named style (Rokushiki ...) held nothing and canAutoM1() was false (Vera fight, 20:48).
     -- Order: keep a weapon already in hand; else sword, else fighting style, else fruit.
+    -- lower = better. Swords first (the raid build puts half the points into Sword), the rarer the better; then
+    -- the fighting style, then the fruit, guns last (21:18: it fought ten guards with a Bazooka in hand).
+    local RARE = { Common = 1, Uncommon = 2, Rare = 3, Epic = 4, Legendary = 5, Mythical = 6 }
+    local itemTable = nil
+    local function itemType(name)
+        if itemTable == nil then
+            itemTable = false
+            pcall(function()
+                local t = require(game:GetService("ReplicatedStorage").Modules.ToolDesc)
+                if type(t) == "table" then itemTable = t end
+            end)
+        end
+        local info = itemTable and itemTable[name]
+        if type(info) == "table" then return tostring(info.Type), RARE[tostring(info.Rare)] or 1 end
+        return nil, 1
+    end
     local function weaponRank(t)
         if not t:IsA("Tool") or t:GetAttribute("Category") ~= "Weapons" then return nil end
-        if t:GetAttribute("devilFruit") then return 3 end
-        if t:GetAttribute("MeleeTool") then return 2 end
-        return 1
+        if t:GetAttribute("devilFruit") then return 30 end
+        if t:GetAttribute("MeleeTool") then return 20 end
+        local ty, rare = itemType(t.Name)
+        if ty == "Gun" then return 40 end
+        return 10 - rare   -- sword: 4 (Mythical) .. 9 (Common)
     end
     function C.holdWeapon()
         local c = LP.Character
@@ -1099,7 +1117,13 @@ do
     local function use(p, what, counter)
         local first = ID.pressed[p] == nil
         ID.tries[p] = (ID.tries[p] or 0) + 1
-        if C.usePrompt(p, what) then
+        -- a walk to a chest / drop is given up the moment an enemy comes close (21:17: walked to a chest through
+        -- ten guards for 20 s, 1558 -> 1284 hp before the first swing)
+        local function enemyNear() return F.cfg.idFight and C.nearestMob(30, function(m) return F.cfg.idBosses or m.Name == "Impel Guard" end) ~= nil end
+        if enemyNear() then ID.tries[p] = ID.tries[p] - 1 return end
+        local okp = C.usePrompt(p, what, enemyNear)
+        if not okp and enemyNear() then ID.tries[p] = ID.tries[p] - 1 return end
+        if okp then
             ID.pressed[p] = os.clock()
             if first then ID.done[counter] = ID.done[counter] + 1 end
         end
