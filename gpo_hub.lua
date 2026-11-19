@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "g_4"
+local VERSION = "g_5"
 
 -- Every thread the hub starts runs inside pcall. The game's anti-cheat listens to ScriptContext.Error and sends the
 -- text of errors from scripts that are not its own to the server (read in the decompiled "anti" module), so an
@@ -639,7 +639,7 @@ do
         return false
     end
     -- follow a recorded hand route (list of Vector3): start at the route point nearest to us, then on to the end
-    function C.followRoute(points, near)
+    function C.followRoute(points, near, stop)
         local r = C.root()
         if not r then return false end
         local first, bestD = 1, math.huge
@@ -652,7 +652,9 @@ do
         C.noSit(true)
         local ok = true
         for i = first, #points do
-            if not C.walkTo(points[i], i == #points and (near or 4) or 6, 20) then
+            if stop and stop() then ok = false break end
+            if not C.walkTo(points[i], i == #points and (near or 4) or 6, 20, stop) then
+                if stop and stop() then ok = false break end
                 ok = false
                 local rr = C.root()
                 if os.clock() - (C.failAt or 0) > 3 and rr then
@@ -1286,7 +1288,8 @@ do
         if gear then
             F.status = "Start room done - walking to the first wave"
             if not ID.waveLogged then ID.waveLogged = true log("impel: start room done (" .. ID.done.chests .. " chests), walking to the first wave") end
-            if not C.followRoute(ID.WAVE1, 6) then task.wait(0.5) end
+            -- stop walking the moment an enemy is close (21:13: lost 300 HP to guards while "walking to the first wave")
+            if not C.followRoute(ID.WAVE1, 6, function() return C.nearestMob(35, isGuard) ~= nil end) then task.wait(0.2) end
             return
         end
         if F.cfg.idMaze and ID.inMaze() then mazeStep() return end
