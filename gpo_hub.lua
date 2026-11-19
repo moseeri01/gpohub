@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "kw_1"
+local VERSION = "kw_2"
 
 -- Every thread the hub starts runs inside pcall. The game's anti-cheat listens to ScriptContext.Error and sends the
 -- text of errors from scripts that are not its own to the server (read in the decompiled "anti" module), so an
@@ -61,7 +61,7 @@ local F = {
         -- Level
         lvlTarget = 325, lvlQuest = true, lvlMove = true, lvlStats = "Sword / Defense", autoStats = false, lvlHaki = false, lvlBlock = false,
         -- Settings
-        normalSpeed = true, sprint = true, keyWalk = false, geppo = true, stopNearPlayer = true, antiAfk = true, autoRejoin = false,
+        normalSpeed = true, sprint = true, keyWalk = true, geppo = true, stopNearPlayer = true, antiAfk = true, autoRejoin = false,
         discordAlert = false, pickUp = false, webhook = "", bossAlert = true, bossRange = 300, bossSkills = false,
     },
 }
@@ -1415,10 +1415,12 @@ do
                         for _, p in ipairs(ID.PADROUTE) do
                             if (p - r.Position).Magnitude < 60 then nearRoute = true break end
                         end
-                        if nearRoute then
-                            pcall(C.followRoute, ID.PADROUTE, 4)
-                        else
-                            pcall(C.walkTo, ID.PADROUTE[1], 8, 40)
+                        -- one path-search walk straight to the pad (22:23: 403 studs in 20 s with the key walk,
+                        -- no stop); the recorded route is only the fallback when that fails
+                        local okPad = false
+                        pcall(function() okPad = C.walkTo(ID.PAD, 4, 60) end)
+                        if not okPad then
+                            if nearRoute then pcall(C.followRoute, ID.PADROUTE, 4) else pcall(C.walkTo, ID.PADROUTE[1], 8, 40) end
                         end
                     end
                 elseif C.alive() then
@@ -2706,7 +2708,7 @@ local sf = UI.card(settings, 1, "Safety")
 UI.toggle(sf, "Move at normal speed only", cfgGet("normalSpeed"), cfgSet("normalSpeed"))
 UI.toggle(sf, "Sprint on long walks (game's own run)", cfgGet("sprint"), cfgSet("sprint"))
 UI.toggle(sf, "Geppo over obstacles when stuck", cfgGet("geppo"), cfgSet("geppo"))
-UI.toggle(sf, "Key walk: hold W + steer camera (test)", cfgGet("keyWalk"), cfgSet("keyWalk"))
+UI.toggle(sf, "Run like a player (hold W, speed 25)", cfgGet("keyWalk"), cfgSet("keyWalk"))
 UI.toggle(sf, "Stop when a player is near", cfgGet("stopNearPlayer"), cfgSet("stopNearPlayer"))
 UI.toggle(sf, "Anti AFK", cfgGet("antiAfk"), cfgSet("antiAfk"))
 UI.toggle(sf, "Auto rejoin", cfgGet("autoRejoin"), cfgSet("autoRejoin"))
