@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local FOLDER = "gpohub"
-local VERSION = "air_2"
+local VERSION = "air_3"
 
 -- Every thread the hub starts runs inside pcall. The game's anti-cheat listens to ScriptContext.Error and sends the
 -- text of errors from scripts that are not its own to the server (read in the decompiled "anti" module), so an
@@ -582,6 +582,10 @@ do
         return cur, max
     end
     function C.airTo(pos, limit, floorY)
+        -- pos may be a list of points (out and back in one go, so the test never ends above water)
+        local list = typeof(pos) == "Vector3" and { pos } or pos
+        local li = 1
+        pos = list[1]
         local h, r = C.hum(), C.root()
         local cam = workspace.CurrentCamera
         if not (h and r and cam and VIM) then return false end
@@ -610,7 +614,13 @@ do
                 local rr, hh = C.root(), C.hum()
                 if not rr or not hh then why = "no character" return end
                 lowest = math.min(lowest, rr.Position.Y)
-                if flat(rr.Position, pos) <= 15 then done = true why = "arrived" return end
+                if flat(rr.Position, pos) <= 15 then
+                    if li >= #list then done = true why = "arrived" return end
+                    local sc0 = C.stamina()
+                    log(string.format("air: point %d reached at %.1f s, stamina %s", li, os.clock() - t0, tostring(sc0)))
+                    li = li + 1
+                    pos = list[li]
+                end
                 if os.clock() - t0 > (limit or 30) then return end
                 if floorY and rr.Position.Y < floorY then why = "too low" return end
                 local sc, sm = C.stamina()
@@ -2408,14 +2418,20 @@ do
             R.goal = nil
         elseif cmd == "air" then
             -- air <x> <y> <z> [seconds]: sky-walk test toward a point (measures distance, time, uses)
-            local x, y, z, sec = rest:match("^(-?[%d%.]+)[%s,]+(-?[%d%.]+)[%s,]+(-?[%d%.]+)%s*([%d%.]*)$")
+            -- air x y z [x y z ...] [seconds]
+            local nums = {}
+            for n in rest:gmatch("-?[%d%.]+") do nums[#nums + 1] = tonumber(n) end
+            local sec = (#nums % 3 == 1) and table.remove(nums) or 12
+            local pts = {}
+            for i = 1, #nums - 2, 3 do pts[#pts + 1] = Vector3.new(nums[i], nums[i + 1], nums[i + 2]) end
+            local x = #pts > 0
             if x then
                 task.spawn(function()
                     local was = F.running
                     F.running = true
                     F.status = "Air test"
                     log("remote: air " .. rest)
-                    C.airTo(Vector3.new(tonumber(x), tonumber(y), tonumber(z)), tonumber(sec) or 12, nil)
+                    C.airTo(pts, sec, nil)
                     F.running = was
                     F.status = "Idle"
                 end)
