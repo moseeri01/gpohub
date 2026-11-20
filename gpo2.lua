@@ -29,7 +29,7 @@ task.wait(0.3)
 if G.__gpo2_seq ~= MY_SEQ then return end
 
 local FOLDER = "gpo2"
-local VERSION = "v2_43"
+local VERSION = "v2_44"
 local REPO_RAW = "https://raw.githubusercontent.com/moseeri01/gpohub/"
 
 -- exact build: gpo2/want.txt (written at push time) names the commit; GitHub main is cached ~5 min.
@@ -3428,6 +3428,7 @@ do
             local ok, cf = pcall(function() return m:GetPivot() end)
             if ok then return cf.Position end
         end
+        if locs == nil and os.clock() < (Q.locsAt or 0) then return nil end
         if locs == nil then
             locs = {}
             pcall(function()
@@ -3443,6 +3444,8 @@ do
             local n = 0
             for _ in pairs(locs) do n = n + 1 end
             log("quest: " .. n .. " quest NPC positions from the game")
+            -- (v2_44: right after a rejoin the game answers with nothing - 20:27 the mode then sat on "no quest here" for good)
+            if n == 0 then locs = nil Q.locsAt = os.clock() + 15 return nil end
         end
         return locs[name]
     end
