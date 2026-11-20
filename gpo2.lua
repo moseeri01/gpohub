@@ -22,7 +22,7 @@ task.wait(0.3)
 if G.__gpo2_seq ~= MY_SEQ then return end
 
 local FOLDER = "gpo2"
-local VERSION = "v2_32"
+local VERSION = "v2_33"
 local REPO_RAW = "https://raw.githubusercontent.com/moseeri01/gpohub/"
 
 -- exact build: gpo2/want.txt (written at push time) names the commit; GitHub main is cached ~5 min.
@@ -68,7 +68,7 @@ local F = {
         mode = "Quest",
         reloadOnTeleport = true,
         hover = false, hoverHeight = 7, hoverSpeed = 15, useSkills = true, autoBlock = true, retreatHp = 30, sprint = true, hoverSkipKeys = "",
-        questPick = "", fishSellEvery = 20, fishKeepLegendary = true, fishBait = "", stopHours = 8,
+        questPick = "", fishSellEvery = 20, fishAutoSell = true, fishCraft = "Off", fishKeepLegendary = true, fishBait = "", stopHours = 8,
         privateCode = "", autoRejoin = true, autoStart = false, sea = "Second Sea",
         flyOver = false, ignoreStrikes = false,   -- test account only: hover over walls on a trip, keep going after a game strike
     },
@@ -2366,6 +2366,19 @@ do
         elseif cmd == "sellfish" then
             -- sellfish: sell at the Fish Buyer now (runs inside the running Fishing mode thread-safe enough for a test)
             task.spawn(function() F.fishing.sell() end)
+        elseif cmd == "craftbait" then
+            -- craftbait <Common|Rare|Legendary>: craft at Blacksmith Sen now (test)
+            task.spawn(function() F.fishing.craft(arg ~= "" and arg or "Common") end)
+        elseif cmd == "fishinfo" then
+            local fs_ = F.fishing
+            local sp = fs_.sen()
+            local npcs = workspace:FindFirstChild("NPCs")
+            local fb = npcs and npcs:FindFirstChild("Fish Buyer")
+            local bpos = fb and fb:GetPivot().Position
+            log(string.format("fishinfo: Sen %s | Fish Buyer %s | bait C %d R %d L %d | Tigerfin %d, Blue-Lip Grouper %d | Crafting gui %s, FishSellerGui %s",
+                sp and string.format("%.0f,%.0f,%.0f", sp.X, sp.Y, sp.Z) or "not loaded", bpos and string.format("%.0f,%.0f,%.0f", bpos.X, bpos.Y, bpos.Z) or "not loaded",
+                fs_.count("Common Fish Bait"), fs_.count("Rare Fish Bait"), fs_.count("Legendary Fish Bait"), fs_.count("Tigerfin"), fs_.count("Blue-Lip Grouper"),
+                tostring(LP.PlayerGui:FindFirstChild("Crafting") ~= nil), tostring(LP.PlayerGui:FindFirstChild("FishSellerGui") ~= nil)))
         elseif cmd == "gate" then
             -- gate: follow the island wall on the water and look for the opening (mode "Move test")
             F.stop()
@@ -2805,7 +2818,7 @@ do
     -- cfg.fishKeepLegendary is on (they make Legendary bait).
     local function fire(btn)
         if type(firesignal) ~= "function" or not btn then return false end
-        for _, sig in ipairs({ "Activated", "MouseButton1Click" }) do pcall(firesignal, btn[sig]) end
+        for _, sig in ipairs({ "Activated", "MouseButton1Click" }) do pcall(function() firesignal(btn[sig]) end) end
         return true
     end
     local function buyer()
@@ -2838,7 +2851,10 @@ do
             local sa = row:IsA("GuiObject") and row.Visible and row:FindFirstChild("SellAll")
             if sa then
                 local price = tonumber((row:FindFirstChild("Price") and row.Price.Text or ""):match("(%d+)")) or 0
-                if F.cfg.fishKeepLegendary and price >= 10000 then
+                local tier = price >= 10000 and "Legendary" or (price >= 1000 and "Rare" or "Common")
+                -- kept: legendary fish (switch), and the fish that make the bait picked under "Craft bait" while that bait is not full
+                local forBait = F.cfg.fishCraft == tier and Fs.count and Fs.TIER and Fs.count(Fs.TIER[tier].bait) < 300
+                if (F.cfg.fishKeepLegendary and tier == "Legendary") or forBait then
                     kept = kept + 1
                 else
                     fire(sa)
@@ -2867,11 +2883,127 @@ do
         task.wait(0.8)
         local gain = (tonumber(A.stat("Peli")) or 0) - peli0
         Fs.soldPeli = (Fs.soldPeli or 0) + gain
-        log(string.format("fishing: sale done - %d kinds sold, %d kept (legendary), +%d Peli", sold, kept, gain))
+        log(string.format("fishing: sale done - %d kinds sold, %d kept, +%d Peli", sold, kept, gain))
         return sold > 0
     end
 
+    -- bait crafting (v2_33). Game code (GUIS.Crafting.CraftingClient, read 2026-11-20): Blacksmith Sen's talk only
+    -- switches PlayerGui.Crafting on. Blueprint row Main.Blueprints.List["<bait>"] -> fish slot
+    -- Main.Requirements.List.Items["<tier> Fish"] -> the fish to use in Main.Requirements.Selection(.List) ->
+    -- Main.Requirements.Craft -> the game's own prompt PlayerGui.craftCountSelector (Accept = "Craft Selected",
+    -- Decline = "Craft 1"). We press those buttons; the game sends its own crafting call. One fish kind per craft,
+    -- bait cap 300. NOT yet seen in game: whether the server wants Sen's talk first, and the slider override.
+    local TIER = {
+        Common = { bait = "Common Fish Bait", fish = "Common Fish" },
+        Rare = { bait = "Rare Fish Bait", fish = "Rare Fish" },
+        Legendary = { bait = "Legendary Fish Bait", fish = "Legendary Fish" },
+    }
+    Fs.TIER = TIER
+    local RS = game:GetService("ReplicatedStorage")
+    local function count(name)
+        local n = 0
+        pcall(function()
+            local m = require(RS.Modules.Client.Managers.InventorySnapshotManager)
+            n = tonumber(m:GetCount(name)) or 0
+        end)
+        return n
+    end
+    Fs.count = count
+    local function sen()
+        local npcs = workspace:FindFirstChild("NPCs")
+        local m = npcs and npcs:FindFirstChild("Blacksmith Sen")
+        local ok, cf = pcall(function() return m:GetPivot() end)
+        return ok and cf.Position or nil, m
+    end
+    Fs.sen = sen
+    local function path(root, ...)
+        local o = root
+        for _, n in ipairs({ ... }) do
+            o = o and o:FindFirstChild(n)
+        end
+        return o
+    end
+    function Fs.craft(tierName)
+        local t = TIER[tierName]
+        if not t then return false end
+        local sp, npc = sen()
+        if not sp then log("fishing: Blacksmith Sen is not loaded near - cannot craft bait here") return false end
+        local have0 = count(t.bait)
+        if have0 >= 300 then log("fishing: " .. t.bait .. " is full (300)") return true end
+        local r = A.root()
+        if M.flat(r.Position, sp) > 8 then
+            setState("walking to Blacksmith Sen")
+            local c = A.char()
+            if c and c:FindFirstChildOfClass("Tool") then A.hum():UnequipTools() task.wait(0.3) end
+            M.walkTo(sp, { near = 6 })
+        end
+        local gui = LP.PlayerGui:FindFirstChild("Crafting")
+        local main = gui and gui:FindFirstChild("Main")
+        if not main then log("fishing: Crafting window not found") return false end
+        setState("crafting " .. t.bait)
+        pcall(function() gui.CraftingClient.Crafter.Value = npc end)
+        gui.Enabled = true
+        task.wait(1.2)
+        local made = 0
+        for round = 1, 8 do
+            if not F.isAlive() then break end
+            local bp = path(main, "Blueprints", "List", t.bait)
+            if not bp then log("fishing: blueprint row '" .. t.bait .. "' not in the list") break end
+            fire(bp)
+            task.wait(0.6)
+            local slot = path(main, "Requirements", "List", "Items", t.fish)
+            if not slot then log("fishing: fish slot '" .. t.fish .. "' not found") break end
+            fire(slot)
+            task.wait(0.6)
+            local sel = path(main, "Requirements", "Selection")
+            local holder = sel and (sel:FindFirstChild("List") or sel)
+            local best, bestN = nil, 0
+            for _, e in ipairs(holder and holder:GetChildren() or {}) do
+                if e:IsA("GuiObject") then
+                    local txt = e:IsA("TextButton") and e.Text or ""
+                    for _, d in ipairs(e:GetDescendants()) do if d:IsA("TextLabel") and d.Text:find("x%s*%d") then txt = d.Text end end
+                    local n = tonumber(txt:match("x%s*(%d+)")) or count(e.Name)
+                    if n > bestN then best, bestN = e, n end
+                end
+            end
+            if round == 1 then log(string.format("fishing: craft window - slot %s, fish choices best %s x%d", slot.ClassName, best and best.Name or "none", bestN)) end
+            if not best then break end
+            fire(best)
+            task.wait(0.5)
+            local before = count(t.bait)
+            fire(path(main, "Requirements", "Craft"))
+            local prompt, t0 = nil, os.clock()
+            while not prompt and os.clock() - t0 < 2 do prompt = LP.PlayerGui:FindFirstChild("craftCountSelector") task.wait(0.1) end
+            if prompt then
+                -- ask for the most the game allows (the slider's own End value)
+                pcall(function()
+                    local sl = path(prompt, "Main", "Slider")
+                    local top = sl and sl:GetAttribute("End")
+                    local S = require(RS.Modules.Client.Slider).Sliders
+                    for _, o in pairs(S) do pcall(function() o:OverrideValue(top) end) end
+                end)
+                task.wait(0.3)
+                fire(path(prompt, "Main", "OptionsFrame", "Accept"))
+            end
+            local t1 = os.clock()
+            while count(t.bait) == before and os.clock() - t1 < 6 do task.wait(0.2) end
+            local got = count(t.bait) - before
+            log(string.format("fishing: craft round %d - %s x%d used, +%d %s (prompt %s)", round, best.Name, bestN, got, t.bait, prompt and "yes" or "no"))
+            if got <= 0 then break end
+            made = made + got
+            if count(t.bait) >= 300 then break end
+            task.wait(0.6)
+        end
+        gui.Enabled = false
+        task.wait(0.6)
+        Fs.crafted = (Fs.crafted or 0) + made
+        log(string.format("fishing: crafting done - +%d %s (now %d)", made, t.bait, count(t.bait)))
+        return made > 0
+    end
+
     F.cfg.fishKeepLegendary = (F.cfg.fishKeepLegendary == nil) and true or F.cfg.fishKeepLegendary
+    if F.cfg.fishAutoSell == nil then F.cfg.fishAutoSell = true end
+    F.cfg.fishCraft = F.cfg.fishCraft or "Off"
     F.cfg.fishSellEvery = F.cfg.fishSellEvery or 20
     F.cfg.fishBait = F.cfg.fishBait or ""
     F.modes.Fishing = {
@@ -2883,9 +3015,13 @@ do
             local soldAt = Fs.wins
             while F.running and F.isAlive() do
                 -- every cfg.fishSellEvery catches: sell at the Fish Buyer (when one is on this island), come back
-                if F.cfg.fishSellEvery > 0 and Fs.wins - soldAt >= F.cfg.fishSellEvery and buyer() then
+                local every = math.max(F.cfg.fishSellEvery, 5)
+                local wantCraft = F.cfg.fishCraft ~= "Off" and Fs.sen()
+                local wantSell = F.cfg.fishAutoSell and buyer()
+                if Fs.wins - soldAt >= every and (wantCraft or wantSell) then
                     soldAt = Fs.wins
-                    Fs.sell()
+                    if wantCraft then Fs.craft(F.cfg.fishCraft) end
+                    if wantSell then Fs.sell() end
                     if spot and A.root() and M.flat(A.root().Position, spot) > 4 then
                         setState("back to the fishing spot")
                         M.walkTo(spot, { near = 3 })
@@ -3459,13 +3595,31 @@ UI.toggle(fc, "Fish here (on / off)", function() return F.running and F.cfg.mode
     end
 end)
 UI.info(fc, "Doing now", function() return (F.running and F.cfg.mode == "Fishing") and (F.fishing.state or "-") or "stopped" end)
-UI.info(fc, "Bait", function() return F.fishing.bait or "-" end)
+local BAITS = { Auto = "", Common = "Common Fish Bait", Rare = "Rare Fish Bait", Legendary = "Legendary Fish Bait" }
+UI.dropdown(fc, "Bait to use", 112, function()
+    return { { key = "", text = "Auto  -  first bait I have" }, { key = "Common Fish Bait", text = "Common Fish Bait" },
+        { key = "Rare Fish Bait", text = "Rare Fish Bait" }, { key = "Legendary Fish Bait", text = "Legendary Fish Bait" } }
+end, function() return F.cfg.fishBait end, function(k) F.cfg.fishBait = k saveAll() end)
+UI.info(fc, "Bait in the bag", function()
+    local c = F.fishing.count
+    if not c then return "-" end
+    return "Common " .. c("Common Fish Bait") .. "   Rare " .. c("Rare Fish Bait") .. "   Legendary " .. c("Legendary Fish Bait")
+end)
 UI.note(fc, "Stand next to open water with a rod and bait, then switch on. It casts, waits and plays the catch bar by itself.")
 local fsell = UI.card(fpg, 1, "Selling")
-UI.stepper(fsell, "Sell after this many fish (0 = never)", 0, 40, cfgGet("fishSellEvery"), cfgSet("fishSellEvery"), 5)
+UI.toggle(fsell, "Auto sell", cfgGet("fishAutoSell"), cfgSet("fishAutoSell"))
+UI.stepper(fsell, "Go after this many fish", 5, 40, cfgGet("fishSellEvery"), cfgSet("fishSellEvery"), 5)
 UI.toggle(fsell, "Keep legendary fish", cfgGet("fishKeepLegendary"), cfgSet("fishKeepLegendary"))
 UI.button(fsell, "Sell now", "Sell", function() F.fishing.sell() end)
 UI.note(fsell, "Selling needs a Fish Buyer on this island.")
+local fcr = UI.card(fpg, 2, "Bait crafting")
+UI.dropdown(fcr, "Craft bait", 112, function()
+    return { { key = "Off", text = "Off  -  do not craft" }, { key = "Common", text = "Common Fish Bait  (1 common fish)" },
+        { key = "Rare", text = "Rare Fish Bait  (2 rare fish)" }, { key = "Legendary", text = "Legendary Fish Bait  (1 legendary fish)" } }
+end, function() return F.cfg.fishCraft end, function(k) F.cfg.fishCraft = k saveAll() end)
+UI.button(fcr, "Craft now", "Craft", function() if F.cfg.fishCraft ~= "Off" then task.spawn(F.fishing.craft, F.cfg.fishCraft) end end)
+UI.info(fcr, "Crafted this session", function() return F.fishing.crafted or 0 end)
+UI.note(fcr, "Needs Blacksmith Sen on this island. Fish of the picked level are kept for bait (max 300 bait), the rest is sold.")
 local fst = UI.card(fpg, 2, "This session")
 UI.info(fst, "Caught / lost", function() return (F.fishing.wins or 0) .. "  /  " .. (F.fishing.losses or 0) end)
 UI.info(fst, "Casts", function() return F.fishing.casts or 0 end)
