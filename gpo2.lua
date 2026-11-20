@@ -22,7 +22,7 @@ task.wait(0.3)
 if G.__gpo2_seq ~= MY_SEQ then return end
 
 local FOLDER = "gpo2"
-local VERSION = "v2_30"
+local VERSION = "v2_31"
 local REPO_RAW = "https://raw.githubusercontent.com/moseeri01/gpohub/"
 
 -- exact build: gpo2/want.txt (written at push time) names the commit; GitHub main is cached ~5 min.
@@ -68,7 +68,7 @@ local F = {
         mode = "Quest",
         reloadOnTeleport = true,
         hover = false, hoverHeight = 7, hoverSpeed = 15, useSkills = true, autoBlock = true, retreatHp = 30, sprint = true, hoverSkipKeys = "",
-        questPick = "", stopHours = 8,
+        questPick = "", fishSellEvery = 20, fishKeepLegendary = true, fishBait = "", stopHours = 8,
         privateCode = "", autoRejoin = true, autoStart = false, sea = "Second Sea",
         flyOver = false, ignoreStrikes = false,   -- test account only: hover over walls on a trip, keep going after a game strike
     },
@@ -2834,7 +2834,7 @@ do
         local list = gui:FindFirstChild("List", true)
         local sold, kept = 0, 0
         for _, row in ipairs(list and list:GetChildren() or {}) do
-            if not F.running then break end
+            if not F.isAlive() then break end
             local sa = row:IsA("GuiObject") and row.Visible and row:FindFirstChild("SellAll")
             if sa then
                 local price = tonumber((row:FindFirstChild("Price") and row.Price.Text or ""):match("(%d+)")) or 0
@@ -3354,10 +3354,18 @@ end)
 -- 1 Home (v1 layout)
 local home = UI.page("Home", 1)
 local run = UI.card(home, 1, "Run")
+-- Start / Stop runs the mode chosen in the next row; OFF stops whatever runs (quests, fishing, a test)
 UI.toggle(run, "Start / Stop", function() return F.running end, function(on)
-    if on then F.cfg.mode = "Quest" F.start() else F.stop() end
+    if on then
+        if F.cfg.mode ~= "Quest" and F.cfg.mode ~= "Fishing" then F.cfg.mode = "Quest" end
+        F.start()
+    else F.stop() end
 end)
-UI.info(run, "Mode", function() return "Level (quests)" end)
+UI.choice(run, "Mode", { "Quest", "Fishing" }, function() return (F.cfg.mode == "Fishing") and "Fishing" or "Quest" end, function(v)
+    if F.running then F.stop() end
+    F.cfg.mode = v
+    saveAll()
+end)
 UI.stepper(run, "Stop after (hours)", 1, 24, cfgGet("stopHours"), cfgSet("stopHours"))
 UI.toggle(run, "Keep Start on after a teleport", cfgGet("autoStart"), cfgSet("autoStart"))
 UI.toggle(run, "Reload hub after a teleport", cfgGet("reloadOnTeleport"), cfgSet("reloadOnTeleport"))
@@ -3412,11 +3420,36 @@ UI.info(fl, "Pulled back / game notices", function() return (F.fight.hv.pulls or
 UI.note(fl, "Speed 15 is the tested safe value. If the counters go up, that speed is too fast.")
 
 -- 3-6 modes of v1 that are not rebuilt in v2 yet: the tab stays, one line says so
-for i, name in ipairs({ "Impel Down", "Boss", "Raids", "Fishing" }) do
+for i, name in ipairs({ "Impel Down", "Boss", "Raids" }) do
     local pg = UI.page(name, 3 + i)
     local c = UI.card(pg, 1, name)
     UI.note(c, "Not rebuilt in v2 yet. The old hub (v1) still has this page.")
 end
+
+-- 7 Fishing (v2_31, owner 18:35: "make the fishing page - I cannot turn it off")
+local fpg = UI.page("Fishing", 7)
+local fc = UI.card(fpg, 1, "Fishing")
+UI.toggle(fc, "Fish here (on / off)", function() return F.running and F.cfg.mode == "Fishing" end, function(on)
+    if on then
+        if F.running then F.stop() task.wait(0.4) end
+        F.cfg.mode = "Fishing"
+        F.start()
+    else
+        F.stop()
+    end
+end)
+UI.info(fc, "Doing now", function() return (F.running and F.cfg.mode == "Fishing") and (F.fishing.state or "-") or "stopped" end)
+UI.info(fc, "Bait", function() return F.fishing.bait or "-" end)
+UI.note(fc, "Stand next to open water with a rod and bait, then switch on. It casts, waits and plays the catch bar by itself.")
+local fsell = UI.card(fpg, 1, "Selling")
+UI.stepper(fsell, "Sell after this many fish (0 = never)", 0, 40, cfgGet("fishSellEvery"), cfgSet("fishSellEvery"), 5)
+UI.toggle(fsell, "Keep legendary fish", cfgGet("fishKeepLegendary"), cfgSet("fishKeepLegendary"))
+UI.button(fsell, "Sell now", "Sell", function() F.fishing.sell() end)
+UI.note(fsell, "Selling needs a Fish Buyer on this island.")
+local fst = UI.card(fpg, 2, "This session")
+UI.info(fst, "Caught / lost", function() return (F.fishing.wins or 0) .. "  /  " .. (F.fishing.losses or 0) end)
+UI.info(fst, "Casts", function() return F.fishing.casts or 0 end)
+UI.info(fst, "Peli from selling", function() return "+" .. comma(F.fishing.soldPeli or 0) end)
 
 -- 7 Level (the quest farm)
 local lv = UI.page("Level", 2)          -- v2_28: right after Home (owner)
