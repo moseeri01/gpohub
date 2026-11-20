@@ -22,7 +22,7 @@ task.wait(0.3)
 if G.__gpo2_seq ~= MY_SEQ then return end
 
 local FOLDER = "gpo2"
-local VERSION = "v2_12"
+local VERSION = "v2_13"
 local REPO_RAW = "https://raw.githubusercontent.com/moseeri01/gpohub/"
 
 -- exact build: gpo2/want.txt (written at push time) names the commit; GitHub main is cached ~5 min.
@@ -198,6 +198,33 @@ function A.correctionText()
     end)
     return found
 end
+-- v2_13 sea test 10:46: the game showed red text "Greater Flight Strike: ... is Distance from Floor: >15" while we
+-- hovered 6 studs over the sea. The text is not in any client script we dumped = it comes from the server: a flight
+-- check (distance from the floor, the sea bed counts) that counts strikes. Every such text is logged and counted;
+-- hover / sea code stops on a new strike.
+F.strikes = 0
+task.spawn(function()
+    local last = ""
+    while F.isAlive() do
+        task.wait(1)
+        if F.running then
+            pcall(function()
+                for _, o in ipairs(LP.PlayerGui:GetDescendants()) do
+                    if o:IsA("TextLabel") and o.Visible then
+                        local t = o.Text
+                        -- ("Strike" alone matched an unrelated "Striker" label, 10:49)
+                        if type(t) == "string" and (t:find("Strike:") or t:find("Distance from Floor")) and t ~= last then
+                            last = t
+                            F.strikes = F.strikes + 1
+                            log("GAME STRIKE NOTICE (" .. F.strikes .. "): " .. t:gsub("<[^>]->", ""):sub(1, 200) .. " | status: " .. tostring(F.status) .. " @ " .. A.posText())
+                        end
+                    end
+                end
+            end)
+        end
+    end
+end)
+
 function A.logPullReason(tag)
     task.spawn(function()
         for _ = 1, 6 do
@@ -703,7 +730,8 @@ F.modes["Move test"] = {
             if not F.running then break end
             setStatus(string.format("Move test: point %d/%d %s", i, #list, p.name or ""))
             local ok, why
-            if p.glide then ok, why = F.fight.glideTo(p.pos, { near = 5 }) else ok, why = M.walkTo(p.pos, { near = 5 }) end
+            if p.sea then ok, why = F.fight.seaGlide(p.pos, { near = 8 })
+            elseif p.glide then ok, why = F.fight.glideTo(p.pos, { near = 5 }) else ok, why = M.walkTo(p.pos, { near = 5 }) end
             if ok then pass = pass + 1 end
             log(string.format("movetest: point %d %s -> %s", i, p.name or "", why))
             if not ok and why ~= "timeout" and why:find("stuck") == nil then break end
@@ -913,6 +941,59 @@ do
             why, dist0, dt, dist0 / math.max(dt, 0.1), (sT + wT) > 0 and math.floor(sT / (sT + wT) * 100) or 0, HV.pulls - p0))
         return ok, why
     end
+    -- sea glide: hover travel over water (and over land in the way) to a far point. Returns ok, why.
+    -- Progress line every 30 s. Stops when the distance left has not shrunk by 15 studs in 25 s ("blocked").
+    function Fi.seaGlide(pos, opts)
+        opts = opts or {}
+        local r = A.root()
+        if not r then return false, "no character" end
+        if HV.ocean == nil then
+            HV.ocean = false
+            pcall(function()
+                local om = require(RS.Modules.OceanModule)
+                if type(om.HeightLookup) == "function" then
+                    HV.ocean = function(x, z) local ok, y = pcall(om.HeightLookup, x, z) return ok and tonumber(y) or 0 end
+                end
+            end)
+            log("sea: ocean height from the game " .. (HV.ocean and string.format("ok (%.1f here)", HV.ocean(r.Position.X, r.Position.Z)) or "NOT available - using y 0"))
+        end
+        local t0, start, p0, c0 = os.clock(), r.Position, HV.pulls, HV.climbs or 0
+        local dist0 = M.flat(start, pos)
+        local best, bestAt, lastLog = dist0, os.clock(), os.clock()
+        local lowest, hp0 = r.Position.Y, A.hum() and A.hum().Health or 0
+        local ok, why = false, "stopped"
+        local char0 = A.char()
+        local strikes0 = F.strikes
+        while F.running and F.isAlive() do
+            if A.char() ~= char0 then why = "died" break end
+            r = A.root()
+            local h = A.hum()
+            if not r or not h or h.Health <= 0 then why = "died" break end
+            local left = M.flat(r.Position, pos)
+            lowest = math.min(lowest, r.Position.Y)
+            if left <= (opts.near or 8) then ok, why = true, "arrived" break end
+            if F.strikes > strikes0 then why = "game flight strike - stopped" break end
+            if left < best - 15 then best, bestAt = left, os.clock()
+            elseif os.clock() - bestAt > 25 then why = string.format("blocked (%.0f left)", left) break end
+            if os.clock() - t0 > (opts.limit or (60 + dist0 / 8)) then why = "timeout" break end
+            if os.clock() - lastLog > 30 then
+                lastLog = os.clock()
+                log(string.format("sea: %.0f left | y %.0f (floor %.0f) | hp %d | %s | pulls %d, climbs %d | corrections %d",
+                    left, r.Position.Y, HV.seaFloor or 0, h.Health, tostring(h:GetState()):gsub("Enum.HumanoidStateType.", ""), HV.pulls - p0, (HV.climbs or 0) - c0, F.corrections or 0))
+            end
+            HV.sea = true
+            Fi.hoverOn(pos)
+            task.wait(0.2)
+        end
+        HV.sea, HV.seaTarget = false, nil
+        Fi.hoverOff()
+        r = A.root()
+        local dt = os.clock() - t0
+        local moved = r and M.flat(r.Position, start) or 0
+        log(string.format("sea: %s | %.0f of %.0f studs in %.0f s (%.1f studs/s) | lowest y %.0f | hp %d -> %d | pulls %d, climbs %d",
+            why, moved, dist0, dt, moved / math.max(dt, 0.1), lowest, hp0, A.hum() and A.hum().Health or 0, HV.pulls - p0, (HV.climbs or 0) - c0))
+        return ok, why
+    end
     function Fi.hoverOn(target)
         HV.target, HV.t = target, os.clock()
         local r = A.root()
@@ -969,6 +1050,13 @@ do
         end
         -- ends by itself: Stop, target gone, or no beat for 1.5 s
         if not F.running or not goal or os.clock() - HV.t > 1.5 then Fi.hoverOff() return end
+        -- a game flight strike while hovering: hover goes off for good (until the owner turns it on again)
+        if F.strikes > (HV.strikesSeen or 0) then
+            HV.strikesSeen = F.strikes
+            if F.cfg.hover then F.cfg.hover = false log("hover: switched OFF after a game strike notice") end
+            Fi.hoverOff()
+            return
+        end
         -- owner 11-20: steady height, no bob (the guard's hover rule only writes a warning, MG:1013)
         local r, h = A.root(), A.hum()
         -- v2_8 probe: AutoRun is on but the game never starts running while MoveDirection is 0 (the AlignPosition
@@ -982,7 +1070,39 @@ do
         local sp = sprinting()
         HV.ap.MaxVelocity = sp and 24 or 15
         if sp then HV.sprintTicks = (HV.sprintTicks or 0) + 1 else HV.walkTicks = (HV.walkTicks or 0) + 1 end
-        HV.ap.Position = goal + Vector3.new(0, F.cfg.hoverHeight or 7, 0)
+        if HV.sea and r and typeof(tg) == "Vector3" then
+            -- sea travel (v2_13, owner: "float like walking on water"): keep H studs over whatever is below -
+            -- the ocean surface (the game's own OceanModule.HeightLookup) or land / a ship / a rock - looking
+            -- 14 studs ahead too, and climb when something solid is in the way
+            if os.clock() - (HV.seaAt or 0) > 0.1 then
+                HV.seaAt = os.clock()
+                local p = r.Position
+                local dir = Vector3.new(goal.X - p.X, 0, goal.Z - p.Z)
+                local left = dir.Magnitude
+                dir = left > 0.5 and dir.Unit or Vector3.zero
+                local rp = RaycastParams.new()
+                rp.FilterType = Enum.RaycastFilterType.Exclude
+                rp.FilterDescendantsInstances = { A.char(), workspace:FindFirstChild("NPCs"), workspace:FindFirstChild("Effects") }
+                rp.IgnoreWater = true
+                local function floorAt(q)
+                    local y = HV.ocean and HV.ocean(q.X, q.Z) or 0
+                    local hit = workspace:Raycast(Vector3.new(q.X, p.Y + 30, q.Z), Vector3.new(0, -400, 0), rp)
+                    if hit and hit.Position.Y > y then y = hit.Position.Y end
+                    return y
+                end
+                local H = F.cfg.seaHeight or 6
+                local floorY = math.max(floorAt(p), floorAt(p + dir * 14))
+                local step = math.min(left, 40)
+                local wall = workspace:Blockcast(CFrame.new(p), Vector3.new(3, 4, 3), dir * 14, rp)
+                local ty = floorY + H
+                if wall then ty = math.max(ty, p.Y + 12) step = 2 HV.climbs = (HV.climbs or 0) + 1 end
+                HV.seaFloor = floorY
+                HV.seaTarget = Vector3.new(p.X + dir.X * step, ty, p.Z + dir.Z * step)
+            end
+            if HV.seaTarget then HV.ap.Position = HV.seaTarget end
+        else
+            HV.ap.Position = goal + Vector3.new(0, F.cfg.hoverHeight or 7, 0)
+        end
         if r and HV.lastP then
             local d = (r.Position - HV.lastP).Magnitude
             if d > 8 then
@@ -1044,7 +1164,7 @@ do
             local d = (hr.Position - r.Position).Magnitude
             -- v2_7: glide up to 150 studs. v2_8 test 08:47: a straight glide stuck on a cliff wall for a minute ->
             -- glide only with a clear line from us to the hover spot; else walk (the path goes around)
-            local hovering = opts.hover and (d <= 12 or (d <= 150 and Fi.clearLine(r.Position, hr.Position + Vector3.new(0, F.cfg.hoverHeight or 7, 0), m)))
+            local hovering = opts.hover and F.cfg.hover and (d <= 12 or (d <= 150 and Fi.clearLine(r.Position, hr.Position + Vector3.new(0, F.cfg.hoverHeight or 7, 0), m)))
             if hovering then
                 Fi.hoverOn(m)          -- the AlignPosition carries us there (22 studs/s max)
                 task.wait(0.1)
@@ -1239,13 +1359,13 @@ do
             F.cfg[k] = nv
             saveAll()
             log("set " .. k .. " = " .. tostring(nv))
-        elseif cmd == "glide" then
-            -- glide x y z: hover travel to a ground point (runs as mode "Move test" with the glide flag)
+        elseif cmd == "glide" or cmd == "sea" then
+            -- glide x y z: hover travel to a ground point | sea x y z: hover travel over water (mode "Move test")
             local x, y, z = arg:match("(%-?[%d%.]+)[,%s]+(%-?[%d%.]+)[,%s]+(%-?[%d%.]+)")
-            if not x then log("glide: no point read") return end
+            if not x then log(cmd .. ": no point read") return end
             F.stop()
             task.wait(0.3)
-            F.moveList = { { pos = Vector3.new(tonumber(x), tonumber(y), tonumber(z)), name = "glide", glide = true } }
+            F.moveList = { { pos = Vector3.new(tonumber(x), tonumber(y), tonumber(z)), name = cmd, glide = cmd == "glide", sea = cmd == "sea" } }
             F.cfg.mode = "Move test"
             F.start()
         elseif cmd == "quest" then
