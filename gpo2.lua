@@ -22,7 +22,7 @@ task.wait(0.3)
 if G.__gpo2_seq ~= MY_SEQ then return end
 
 local FOLDER = "gpo2"
-local VERSION = "v2_5"
+local VERSION = "v2_6"
 local REPO_RAW = "https://raw.githubusercontent.com/moseeri01/gpohub/"
 
 -- exact build: gpo2/want.txt (written at push time) names the commit; GitHub main is cached ~5 min.
@@ -67,6 +67,7 @@ local F = {
     cfg = {
         mode = "Quest",
         reloadOnTeleport = true,
+        hover = false, hoverHeight = 5,
     },
 }
 function F.isAlive() return F.alive and G.__gpo2_seq == MY_SEQ end
@@ -146,6 +147,21 @@ function A.posText()
     if not r then return "-" end
     local p = r.Position
     return string.format("%d,%d,%d", p.X, p.Y, p.Z)
+end
+
+-- the server's own movement check moves the client through a "MovementCorrection" JSON attribute (read in the
+-- MovementGuard code, MG:439-460). Its logic is server-side and unknown, so every value it writes is logged.
+do
+    local function watch(o, who)
+        if not o then return end
+        F.conns[#F.conns + 1] = o:GetAttributeChangedSignal("MovementCorrection"):Connect(function()
+            F.corrections = (F.corrections or 0) + 1
+            log("SERVER CORRECTION (" .. who .. "): " .. tostring(o:GetAttribute("MovementCorrection")):sub(1, 200))
+        end)
+    end
+    watch(LP, "player")
+    watch(LP.Character, "character")
+    F.conns[#F.conns + 1] = LP.CharacterAdded:Connect(function(c) watch(c, "character") end)
 end
 
 -- come back after a teleport (the executor runs this line in the next server)
@@ -799,9 +815,67 @@ do
         return true
     end
 
+    -- hover (v2_6, owner 11-20: float near the mob, no visible Geppo pose). Read in the game code (MovementGuard
+    -- Rules R:304-340): "hover" = in the air with |vertical speed| <= 3 for 2 s, and it only writes a warning;
+    -- what pulls back is horizontal speed (> 25 studs/s sprinting, burst 16.5 studs per 0.5 s) or > 24 studs in
+    -- one 0.05 s sample. Geppo gives no air allowance, so it is not used here. So: an AlignPosition holds us
+    -- H studs over the target, capped at 22 studs/s, with a slow up-down bob (peak ~6 studs/s) so the vertical
+    -- speed never stays under 3 for 2 s. No HipHeight / Gravity / WalkSpeed change (the anti module checks those).
+    local HV = { n = 0, pulls = 0 }
+    Fi.hv = HV
+    function Fi.hoverOff()
+        if HV.ap then pcall(function() HV.ap:Destroy() end) pcall(function() HV.att:Destroy() end) end
+        HV.ap, HV.att, HV.target = nil, nil, nil
+    end
+    function Fi.hoverOn(target)
+        HV.target, HV.t = target, os.clock()
+        local r = A.root()
+        if not r then return end
+        if HV.ap and HV.ap.Parent == r then return end
+        Fi.hoverOff()
+        HV.target = target
+        pcall(function()
+            local att = Instance.new("Attachment")
+            att.Name = "RootRigAttachment2"
+            att.Parent = r
+            local ap = Instance.new("AlignPosition")
+            ap.Name = "Align"
+            ap.Mode = Enum.PositionAlignmentMode.OneAttachment
+            ap.Attachment0 = att
+            ap.MaxForce = 1e6
+            ap.MaxVelocity = 22
+            ap.Responsiveness = 30
+            ap.Position = r.Position
+            ap.Parent = r
+            HV.att, HV.ap = att, ap
+            HV.n = HV.n + 1
+            HV.lastP = r.Position
+        end)
+    end
+    F.conns[#F.conns + 1] = game:GetService("RunService").Heartbeat:Connect(function()
+        if not HV.ap then return end
+        local tg = HV.target
+        local hr = tg and tg:FindFirstChild("HumanoidRootPart")
+        local th = tg and tg:FindFirstChildOfClass("Humanoid")
+        -- ends by itself: Stop, target gone, or no fight beat for 1.5 s
+        if not F.running or not hr or not th or th.Health <= 0 or os.clock() - HV.t > 1.5 then Fi.hoverOff() return end
+        local bob = math.sin(os.clock() * math.pi) * 2          -- 2 s period, +-2 studs
+        HV.ap.Position = hr.Position + Vector3.new(0, (F.cfg.hoverHeight or 5) + bob, 0)
+        local r = A.root()
+        if r and HV.lastP then
+            local d = (r.Position - HV.lastP).Magnitude
+            if d > 8 then
+                HV.pulls = HV.pulls + 1
+                log(string.format("hover: PULLED %.0f studs (%.0f,%.0f,%.0f -> %.0f,%.0f,%.0f)", d, HV.lastP.X, HV.lastP.Y, HV.lastP.Z, r.Position.X, r.Position.Y, r.Position.Z))
+            end
+        end
+        HV.lastP = r and r.Position
+    end)
+
     -- back off: walk away from the enemy and wait until HP is back above `back` %
     function Fi.retreat(from, back)
         Fi.st.retreats = Fi.st.retreats + 1
+        Fi.hoverOff()
         local r = A.root()
         if not r then return end
         local away = Vector3.new(r.Position.X - from.X, 0, r.Position.Z - from.Z)
@@ -834,7 +908,11 @@ do
             F.status = string.format("Fighting %s (%d hp)", m.Name, mh.Health)
 
             local d = (hr.Position - r.Position).Magnitude
-            if d > 40 then
+            local hovering = opts.hover and d <= 60
+            if hovering then
+                Fi.hoverOn(m)          -- the AlignPosition carries us there (22 studs/s max)
+                task.wait(0.1)
+            elseif d > 40 then
                 M.walkTo(hr.Position, { near = Fi.reach, limit = 15, stop = function() return mh.Health <= 0 or not m.Parent end })
             elseif d > Fi.reach then
                 -- close chase: follow directly, re-aim every 0.15 s, up to 1.2 s
@@ -848,7 +926,8 @@ do
             end
             r = A.root()
             if not r then return "died" end
-            d = (hr.Position - r.Position).Magnitude
+            -- hovering: reach is measured flat (we are hoverHeight studs above the target on purpose)
+            d = hovering and flat(hr.Position, r.Position) or (hr.Position - r.Position).Magnitude
             if d <= Fi.reach + 2 then lastSeenClose = os.clock() end
             if os.clock() - lastSeenClose > 25 then return "lost" end
 
@@ -863,12 +942,13 @@ do
                 task.wait(0.85)
             elseif opts.skills ~= false and d <= 12 and Fi.skill(hr.Position) then
                 -- skill used (no M1 right before it: an M1 keeps the game from casting)
-            else
-                if swing() then
-                    Fi.st.swings = Fi.st.swings + 1
-                    if d > Fi.reach + 2 then Fi.st.airSwings = Fi.st.airSwings + 1 end
-                end
+            elseif d <= Fi.reach + 2 then
+                -- v2_5 test: 10 of 18 swings went out while chasing (out of reach) -> swing only when in reach
+                if swing() then Fi.st.swings = Fi.st.swings + 1 end
                 task.wait(0.25)
+            else
+                Fi.st.airSwings = Fi.st.airSwings + 1   -- now counts "wanted to swing, too far"
+                task.wait(0.1)
             end
         end
     end
@@ -886,7 +966,7 @@ F.modes["Fight test"] = {
         if not r then return end
         local home = r.Position
         local kills, deaths, t0 = 0, 0, os.clock()
-        local s0 = { swings = Fi.st.swings, air = Fi.st.airSwings, blocks = Fi.st.blocks, retreats = Fi.st.retreats }
+        local s0 = { swings = Fi.st.swings, air = Fi.st.airSwings, blocks = Fi.st.blocks, retreats = Fi.st.retreats, pulls = Fi.hv.pulls }
         local idleSince = nil
         while F.running and F.isAlive() and kills < F.cfg.fightCount do
             local h = A.hum()
@@ -895,8 +975,12 @@ F.modes["Fight test"] = {
                 log("fighttest: died - stopping")
                 break
             end
+            -- v2_6 test 08:29: a test started at 45/665 HP (left standing among Zombies after the last one) and died.
+            -- Below 60 % before a new target: back off first and heal.
             local m = Fi.nearest(F.cfg.fightRange, home)
-            if not m then
+            if m and h.Health < h.MaxHealth * 0.6 then
+                Fi.retreat(m.HumanoidRootPart.Position, 80)
+            elseif not m then
                 idleSince = idleSince or os.clock()
                 setStatus("Fight test: no enemy in range, waiting")
                 if os.clock() - idleSince > 60 then log("fighttest: no enemy for 60 s - stopping") break end
@@ -909,7 +993,7 @@ F.modes["Fight test"] = {
                 local mh = m:FindFirstChildOfClass("Humanoid")
                 local name, mhp, hpBefore, sw0, air0, k0 = m.Name, mh and mh.MaxHealth or 0, h.Health, Fi.st.swings, Fi.st.airSwings, os.clock()
                 local sk0 = Fi.st.skills
-                local res = Fi.kill(m, { retreatHp = 30, backHp = 75 })
+                local res = Fi.kill(m, { retreatHp = 30, backHp = 75, hover = F.cfg.hover })
                 if res == "killed" then kills = kills + 1 end
                 if res == "died" then deaths = deaths + 1 end
                 local hh = A.hum()
@@ -918,8 +1002,10 @@ F.modes["Fight test"] = {
                 if res == "died" then break end
             end
         end
-        log(string.format("fighttest: done | kills %d, deaths %d in %.0f s | swings %d, out of reach %d, blocks %d, retreats %d",
-            kills, deaths, os.clock() - t0, Fi.st.swings - s0.swings, Fi.st.airSwings - s0.air, Fi.st.blocks - s0.blocks, Fi.st.retreats - s0.retreats))
+        Fi.hoverOff()
+        log(string.format("fighttest: done | kills %d, deaths %d in %.0f s | swings %d, too far %d, blocks %d, retreats %d | hover %s, hover pulls %d",
+            kills, deaths, os.clock() - t0, Fi.st.swings - s0.swings, Fi.st.airSwings - s0.air, Fi.st.blocks - s0.blocks, Fi.st.retreats - s0.retreats,
+            tostring(F.cfg.hover), Fi.hv.pulls - s0.pulls))
     end,
 }
 
@@ -994,14 +1080,19 @@ do
             F.start()
         elseif cmd == "fight" then
             -- fight [count] [range] -> mode "Fight test" around the current spot
+            -- fight [count] [range] [hover|walk]
             local n, rg = arg:match("^(%d*)%s*(%d*)")
             F.stop()
             task.wait(0.3)
             F.cfg.fightCount = tonumber(n) or 10
             F.cfg.fightRange = tonumber(rg) or 120
+            if arg:find("hover") then F.cfg.hover = true elseif arg:find("walk") then F.cfg.hover = false end
             F.cfg.mode = "Fight test"
             log(string.format("fight: %d kills, range %d", F.cfg.fightCount, F.cfg.fightRange))
             F.start()
+        elseif cmd == "ui" then
+            -- ui on / ui off: hide the window so a screenshot shows the game
+            pcall(function() win.Visible = (arg ~= "off") end)
         elseif cmd == "scan" then
             -- scan [range]: every model with a Humanoid within range, nearest first, and why it is / is not an enemy
             local rg = tonumber(arg) or 200
@@ -1088,6 +1179,7 @@ end
 function F.close()
     F.running = false
     F.alive = false
+    pcall(function() F.fight.hoverOff() end)
     for _, c in ipairs(F.conns) do pcall(function() c:Disconnect() end) end
     pcall(function() gui:Destroy() end)
     log("closed")
@@ -1115,6 +1207,11 @@ UI.info(acc, "Level", function() return A.level() end)
 UI.info(acc, "Quest", function() local q, p = A.quest() return q ~= "" and (q .. " (" .. p .. ")") or "none" end)
 UI.info(acc, "HP", function() local h = A.hum() return h and string.format("%d / %d", h.Health, h.MaxHealth) or "-" end)
 UI.info(acc, "Position", function() return A.posText() end)
+
+local fightCard = UI.card(home, 2, "Fight")
+UI.toggle(fightCard, "Hover over the target", cfgGet("hover"), cfgSet("hover"))
+UI.stepper(fightCard, "Hover height", 3, 10, cfgGet("hoverHeight"), cfgSet("hoverHeight"))
+UI.info(fightCard, "Server corrections", function() return F.corrections or 0 end)
 
 -- Settings
 local set = UI.page("Settings", 2)
