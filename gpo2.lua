@@ -22,7 +22,7 @@ task.wait(0.3)
 if G.__gpo2_seq ~= MY_SEQ then return end
 
 local FOLDER = "gpo2"
-local VERSION = "v2_3"
+local VERSION = "v2_5"
 local REPO_RAW = "https://raw.githubusercontent.com/moseeri01/gpohub/"
 
 -- exact build: gpo2/want.txt (written at push time) names the commit; GitHub main is cached ~5 min.
@@ -652,6 +652,278 @@ F.modes["Move test"] = {
 }
 
 --------------------------------------------------------------------------------
+-- fight: pick the nearest enemy, close in, face it, M1 through the game's own Attack call (proven in v1 with
+-- Magu-Magu, hits landed at 0.8-4.3 studs), hold F to block when own HP drops fast, back off when HP is low.
+-- No skills yet, no hover yet (added after this works). Counters for the test line: swings, "air swings"
+-- (swung while the target was out of reach), damage dealt, HP lost, blocks, retreats.
+--------------------------------------------------------------------------------
+local Fi = { reach = 4.5 }
+do
+    local VIM = nil
+    pcall(function() VIM = game:GetService("VirtualInputManager") end)
+    local flat = M.flat
+
+    -- quest givers carry no prompt, so their names come from the game's own quest table (asked once)
+    local questNames = nil
+    local function isQuestGiver(name)
+        if questNames == nil then
+            questNames = {}
+            pcall(function()
+                local t = RS.Events.Quest:InvokeServer({ "getQuestLocations" })
+                if type(t) == "table" then for k in pairs(t) do questNames[tostring(k)] = true end end
+            end)
+        end
+        return questNames[name] == true
+    end
+    function Fi.isMob(m)
+        if not m:IsA("Model") then return false end
+        local h, hr = m:FindFirstChildOfClass("Humanoid"), m:FindFirstChild("HumanoidRootPart")
+        if not h or not hr or h.Health <= 0 then return false end
+        if m:FindFirstChildWhichIsA("ProximityPrompt", true) then return false end
+        if Players:GetPlayerFromCharacter(m) then return false end
+        return not isQuestGiver(m.Name)
+    end
+    -- nearest enemy within range of `around` (default: us); accept(m) filters further
+    function Fi.nearest(range, around, accept)
+        local npcs, r = workspace:FindFirstChild("NPCs"), A.root()
+        if not npcs or not r then return nil end
+        around = around or r.Position
+        local best, bestD = nil, range
+        for _, m in ipairs(npcs:GetChildren()) do
+            if Fi.isMob(m) and (not accept or accept(m)) then
+                local hr = m.HumanoidRootPart
+                if (hr.Position - around).Magnitude <= range then
+                    local d = (hr.Position - r.Position).Magnitude
+                    if d < bestD then best, bestD = m, d end
+                end
+            end
+        end
+        return best, bestD
+    end
+
+    -- weapon: keep a weapon in hand; else the best one in the Backpack (v1 order: the stat behind it decides)
+    local function weaponRank(t)
+        if not t:IsA("Tool") or t:GetAttribute("Category") ~= "Weapons" then return nil end
+        if t:GetAttribute("devilFruit") then return 30 - (tonumber(A.stat("DevilFruitMastery")) or 0) / 10 end
+        if t:GetAttribute("MeleeTool") then return 20 - (tonumber(A.stat("Strength")) or 0) / 10 end
+        return 15 - (tonumber(A.stat("SwordMastery")) or 0) / 10
+    end
+    function Fi.holdWeapon()
+        local c = A.char()
+        if not c then return nil end
+        local held = c:FindFirstChildOfClass("Tool")
+        if held and weaponRank(held) then return held end
+        local bp = LP:FindFirstChild("Backpack")
+        local pick, best = nil, 99
+        for _, t in ipairs(bp and bp:GetChildren() or {}) do
+            local rk = weaponRank(t)
+            if rk and rk < best then pick, best = t, rk end
+        end
+        if pick and A.hum() then
+            pcall(function() A.hum():EquipTool(pick) end)
+            log("fight: equip " .. pick.Name)
+            task.wait(0.3)
+        end
+        return c:FindFirstChildOfClass("Tool")
+    end
+
+    local function face(pos)
+        local r = A.root()
+        if not r then return end
+        local to = Vector3.new(pos.X, r.Position.Y, pos.Z)
+        if (to - r.Position).Magnitude > 0.5 then pcall(function() r.CFrame = CFrame.lookAt(r.Position, to) end) end
+    end
+    local function holdKey(k, secs)
+        if not VIM then return end
+        task.spawn(function()
+            VIM:SendKeyEvent(true, k, false, game)
+            task.wait(secs)
+            VIM:SendKeyEvent(false, k, false, game)
+        end)
+    end
+
+    -- own HP over the last 1.2 s (block decision)
+    local hpHist = {}
+    task.spawn(function()
+        while F.isAlive() do
+            local h = A.hum()
+            if h then
+                local now = os.clock()
+                hpHist[#hpHist + 1] = { now, h.Health }
+                while #hpHist > 1 and now - hpHist[1][1] > 1.2 do table.remove(hpHist, 1) end
+            end
+            task.wait(0.2)
+        end
+    end)
+    local function hpDrop()
+        local h = A.hum()
+        if not h then return 0 end
+        local top = h.Health
+        for _, e in ipairs(hpHist) do if e[2] > top then top = e[2] end end
+        return top - h.Health
+    end
+
+    Fi.st = { swings = 0, airSwings = 0, blocks = 0, retreats = 0 }
+    local function swing()
+        local ic = M.input()
+        local atk = ic and ic.Callbacks.Attack
+        if not atk then return false end
+        local can = false
+        pcall(function() can = ic.Utils.canAutoM1() end)
+        if can ~= true then return false end
+        task.spawn(function() atk:PC_Activate() end)
+        return true
+    end
+
+    -- skills (v2_5): v2_4 test 08:01 - M1 alone with Magu-Magu took 90 s and did not kill a 450 hp Zombie (the
+    -- account has its points in Defense / Stamina, the fruit's damage is in its skills). v1 killed the same Zombies
+    -- in 3-15 s with skills on. Same way as v1: point the camera at the target (skills aim from the client), hold
+    -- the key 0.6 s (fruit skills charge while held, fire on release), one key every 1.5 s.
+    local SKILL_KEYS = { Enum.KeyCode.Z, Enum.KeyCode.X, Enum.KeyCode.C, Enum.KeyCode.E, Enum.KeyCode.R }
+    local skillN, lastSkill = 0, 0
+    Fi.st.skills = 0
+    function Fi.skill(pos)
+        if not VIM or os.clock() - lastSkill < 1.5 then return false end
+        lastSkill = os.clock()
+        skillN = skillN % #SKILL_KEYS + 1
+        pcall(function()
+            local cam = workspace.CurrentCamera
+            cam.CFrame = CFrame.lookAt(cam.CFrame.Position, pos)
+            VIM:SendMouseMoveEvent(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2, game)
+        end)
+        Fi.st.skills = Fi.st.skills + 1
+        VIM:SendKeyEvent(true, SKILL_KEYS[skillN], false, game)
+        task.wait(0.6)
+        VIM:SendKeyEvent(false, SKILL_KEYS[skillN], false, game)
+        task.wait(0.3)
+        return true
+    end
+
+    -- back off: walk away from the enemy and wait until HP is back above `back` %
+    function Fi.retreat(from, back)
+        Fi.st.retreats = Fi.st.retreats + 1
+        local r = A.root()
+        if not r then return end
+        local away = Vector3.new(r.Position.X - from.X, 0, r.Position.Z - from.Z)
+        away = away.Magnitude > 1 and away.Unit or Vector3.new(1, 0, 0)
+        log(string.format("fight: low HP (%d%%), backing off", A.hum() and A.hum().Health / A.hum().MaxHealth * 100 or 0))
+        M.walkTo(r.Position + away * 60, { near = 6, limit = 12 })
+        local t0 = os.clock()
+        while F.running and F.isAlive() and os.clock() - t0 < 40 do
+            local h = A.hum()
+            if not h or h.Health <= 0 or h.Health >= h.MaxHealth * back / 100 then break end
+            task.wait(0.5)
+        end
+    end
+
+    -- fight one enemy until it dies, we die, Stop, or it is lost. Returns "killed" / "died" / "lost" / "stopped" / "retreat"
+    function Fi.kill(m, opts)
+        opts = opts or {}
+        local hr, mh = m:FindFirstChild("HumanoidRootPart"), m:FindFirstChildOfClass("Humanoid")
+        if not hr or not mh then return "lost" end
+        local t0, lastSeenClose = os.clock(), os.clock()
+        -- a respawn gives a new character with full HP: v2_4 counted two deaths as "retreat", so check the object
+        local char0 = A.char()
+        while true do
+            if not F.running or not F.isAlive() then return "stopped" end
+            local h, r = A.hum(), A.root()
+            if A.char() ~= char0 or not h or not r or h.Health <= 0 then return "died" end
+            if not m.Parent or mh.Health <= 0 then return "killed" end
+            if os.clock() - t0 > (opts.limit or 90) then return "lost" end
+            if h.Health < h.MaxHealth * (opts.retreatHp or 30) / 100 then Fi.retreat(hr.Position, opts.backHp or 75) return "retreat" end
+            F.status = string.format("Fighting %s (%d hp)", m.Name, mh.Health)
+
+            local d = (hr.Position - r.Position).Magnitude
+            if d > 40 then
+                M.walkTo(hr.Position, { near = Fi.reach, limit = 15, stop = function() return mh.Health <= 0 or not m.Parent end })
+            elseif d > Fi.reach then
+                -- close chase: follow directly, re-aim every 0.15 s, up to 1.2 s
+                local c0 = os.clock()
+                while F.running and mh.Health > 0 and os.clock() - c0 < 1.2 do
+                    r = A.root()
+                    if not r or (hr.Position - r.Position).Magnitude <= Fi.reach then break end
+                    h:MoveTo(hr.Position)
+                    task.wait(0.15)
+                end
+            end
+            r = A.root()
+            if not r then return "died" end
+            d = (hr.Position - r.Position).Magnitude
+            if d <= Fi.reach + 2 then lastSeenClose = os.clock() end
+            if os.clock() - lastSeenClose > 25 then return "lost" end
+
+            face(hr.Position)
+            Fi.holdWeapon()
+            local drop = hpDrop()
+            if d <= 9 and drop >= h.MaxHealth * 0.06 and os.clock() - (Fi.lastBlock or 0) > 2 then
+                Fi.lastBlock = os.clock()
+                Fi.st.blocks = Fi.st.blocks + 1
+                holdKey(Enum.KeyCode.F, 0.8)
+                hpHist = {}
+                task.wait(0.85)
+            elseif opts.skills ~= false and d <= 12 and Fi.skill(hr.Position) then
+                -- skill used (no M1 right before it: an M1 keeps the game from casting)
+            else
+                if swing() then
+                    Fi.st.swings = Fi.st.swings + 1
+                    if d > Fi.reach + 2 then Fi.st.airSwings = Fi.st.airSwings + 1 end
+                end
+                task.wait(0.25)
+            end
+        end
+    end
+end
+F.fight = Fi
+
+-- "Fight test" mode: kill enemies around the spot where Start was pressed (range F.cfg.fightRange), until
+-- F.cfg.fightCount kills; one line per enemy, one summary line
+F.cfg.fightRange = F.cfg.fightRange or 120
+F.cfg.fightCount = F.cfg.fightCount or 10
+F.modes["Fight test"] = {
+    order = 8,
+    run = function()
+        local r = A.root()
+        if not r then return end
+        local home = r.Position
+        local kills, deaths, t0 = 0, 0, os.clock()
+        local s0 = { swings = Fi.st.swings, air = Fi.st.airSwings, blocks = Fi.st.blocks, retreats = Fi.st.retreats }
+        local idleSince = nil
+        while F.running and F.isAlive() and kills < F.cfg.fightCount do
+            local h = A.hum()
+            if not h or h.Health <= 0 then
+                deaths = deaths + 1
+                log("fighttest: died - stopping")
+                break
+            end
+            local m = Fi.nearest(F.cfg.fightRange, home)
+            if not m then
+                idleSince = idleSince or os.clock()
+                setStatus("Fight test: no enemy in range, waiting")
+                if os.clock() - idleSince > 60 then log("fighttest: no enemy for 60 s - stopping") break end
+                -- go back near the start spot while waiting
+                local rr = A.root()
+                if rr and M.flat(rr.Position, home) > 30 then M.walkTo(home, { near = 10 }) end
+                task.wait(1)
+            else
+                idleSince = nil
+                local mh = m:FindFirstChildOfClass("Humanoid")
+                local name, mhp, hpBefore, sw0, air0, k0 = m.Name, mh and mh.MaxHealth or 0, h.Health, Fi.st.swings, Fi.st.airSwings, os.clock()
+                local sk0 = Fi.st.skills
+                local res = Fi.kill(m, { retreatHp = 30, backHp = 75 })
+                if res == "killed" then kills = kills + 1 end
+                if res == "died" then deaths = deaths + 1 end
+                local hh = A.hum()
+                log(string.format("fighttest: %s (%d hp, %d left) -> %s in %.1f s | swings %d, out of reach %d, skills %d | own hp %d -> %d",
+                    name, mhp, mh and m.Parent and mh.Health or 0, res, os.clock() - k0, Fi.st.swings - sw0, Fi.st.airSwings - air0, Fi.st.skills - sk0, hpBefore, hh and hh.Health or 0))
+                if res == "died" then break end
+            end
+        end
+        log(string.format("fighttest: done | kills %d, deaths %d in %.0f s | swings %d, out of reach %d, blocks %d, retreats %d",
+            kills, deaths, os.clock() - t0, Fi.st.swings - s0.swings, Fi.st.airSwings - s0.air, Fi.st.blocks - s0.blocks, Fi.st.retreats - s0.retreats))
+    end,
+}
+
+--------------------------------------------------------------------------------
 -- remote: lets Claude drive tests from the PC.
 --   gpo2/cmd.txt    : one command per line, read every 2 s, then emptied
 --   gpo2/state.json : written every 2 s
@@ -720,6 +992,38 @@ do
             F.cfg.mode = "Move test"
             log(string.format("%s: %d points", cmd, #list))
             F.start()
+        elseif cmd == "fight" then
+            -- fight [count] [range] -> mode "Fight test" around the current spot
+            local n, rg = arg:match("^(%d*)%s*(%d*)")
+            F.stop()
+            task.wait(0.3)
+            F.cfg.fightCount = tonumber(n) or 10
+            F.cfg.fightRange = tonumber(rg) or 120
+            F.cfg.mode = "Fight test"
+            log(string.format("fight: %d kills, range %d", F.cfg.fightCount, F.cfg.fightRange))
+            F.start()
+        elseif cmd == "scan" then
+            -- scan [range]: every model with a Humanoid within range, nearest first, and why it is / is not an enemy
+            local rg = tonumber(arg) or 200
+            local r = A.root()
+            if not r then log("scan: no character") return end
+            local rows = {}
+            local function look(m, where)
+                if not m:IsA("Model") then return end
+                local h, hr = m:FindFirstChildOfClass("Humanoid"), m:FindFirstChild("HumanoidRootPart")
+                if not h or not hr or m == A.char() then return end
+                local d = (hr.Position - r.Position).Magnitude
+                if d > rg then return end
+                local why = F.fight.isMob(m) and "ENEMY" or (h.Health <= 0 and "dead" or (m:FindFirstChildWhichIsA("ProximityPrompt", true) and "prompt" or (Players:GetPlayerFromCharacter(m) and "player" or "quest giver?")))
+                rows[#rows + 1] = { d = d, s = string.format("%s [%s] %.0f studs, hp %d, %s", m.Name, where, d, h.Health, why) }
+            end
+            local npcs = workspace:FindFirstChild("NPCs")
+            log("scan: workspace.NPCs " .. (npcs and (#npcs:GetChildren() .. " children") or "MISSING"))
+            for _, m in ipairs(npcs and npcs:GetChildren() or {}) do look(m, "NPCs") end
+            for _, m in ipairs(workspace:GetChildren()) do if m ~= npcs then look(m, "ws") end end
+            table.sort(rows, function(a, b) return a.d < b.d end)
+            for i = 1, math.min(#rows, 15) do log("scan: " .. rows[i].s) end
+            log(string.format("scan: %d with a Humanoid within %d studs", #rows, rg))
         elseif cmd == "close" then
             F.close()
         else
