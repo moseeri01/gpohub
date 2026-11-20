@@ -25,7 +25,7 @@ while not LP do task.wait(0.2) LP = Players.LocalPlayer end
 task.wait(0.3)
 if G.__gpo_hub_seq ~= MY_SEQ then return end
 local FOLDER = "gpohub"
-local VERSION = "h_12"
+local VERSION = "h_13"
 
 -- Exact build. GitHub serves the main file from a cache for about 5 minutes, so a hub loaded right after a push
 -- can be an older build. gpohub/want.txt (written at push time on this PC) names the commit to run; a hub that
@@ -2679,10 +2679,34 @@ do
             return
         end
         local want = s.m:lower()
+        -- h_13: a mob that cannot be reached is left alone for 90 s (07:07: fell to a lower level, the "nearest"
+        -- Zombie stood 76 studs away / 32 higher, the hub tried to reach it for minutes)
+        L.badMob = L.badMob or setmetatable({}, { __mode = "k" })
         local m = C.nearestMob(F.cfg.mobRange * 4, function(mob)
             local n = mob.Name:lower()
+            if (L.badMob[mob] or 0) > os.clock() then return false end
             return n == want or n == want .. "s" or n .. "s" == want
         end)
+        if m then
+            local mh = m:FindFirstChildOfClass("Humanoid")
+            local d = (m.HumanoidRootPart.Position - r.Position).Magnitude
+            local ch = L.chase
+            if not ch or ch.m ~= m then
+                L.chase = { m = m, t = os.clock(), hp = mh and mh.Health or 0 }
+            elseif d <= 12 or (mh and mh.Health < ch.hp - 0.5) then
+                ch.t, ch.hp = os.clock(), mh and mh.Health or 0      -- reached it or hurt it: fine
+            elseif os.clock() - ch.t > 25 then
+                L.badMob[m] = os.clock() + 90
+                L.chase = nil
+                log(string.format("level: cannot reach %s (%.0f away, %.0f higher) for 25 s - leaving it 90 s, back to %s",
+                    m.Name, d, m.HumanoidRootPart.Position.Y - r.Position.Y, s.n))
+                if pos then
+                    F.status = "Level: mob out of reach - back to " .. s.n
+                    C.walkTo(pos, 12, 40)
+                end
+                return
+            end
+        end
         if not m then
             -- t_22: the quest s mob does not show up (boss gone, other island) -> quit it like the quest window does
             L.noMobSince = L.noMobSince or os.clock()
