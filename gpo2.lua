@@ -29,7 +29,7 @@ task.wait(0.3)
 if G.__gpo2_seq ~= MY_SEQ then return end
 
 local FOLDER = "gpo2"
-local VERSION = "v2_46"
+local VERSION = "v2_47"
 local REPO_RAW = "https://raw.githubusercontent.com/moseeri01/gpohub/"
 
 -- exact build: gpo2/want.txt (written at push time) names the commit; GitHub main is cached ~5 min.
@@ -75,7 +75,7 @@ local F = {
         mode = "Quest",
         reloadOnTeleport = true,
         hover = false, hoverHeight = 7, hoverSpeed = 15, useSkills = true, autoBlock = true, retreatHp = 30, sprint = true, hoverSkipKeys = "",
-        questPick = "", fishSellEvery = 20, fishAutoSell = true, seaSpeed = 30, takeQuest = true, plat = false, fishCraft = "Common", fishAutoCraft = false, fishKeepLegendary = true, fishBait = "", stopHours = 8,
+        questPick = "", fishSellEvery = 20, fishAutoSell = true, seaSpeed = 30, takeQuest = true, autoStats = false, farmWith = "Auto", plat = false, fishCraft = "Common", fishAutoCraft = false, fishKeepLegendary = true, fishBait = "", stopHours = 8,
         privateCode = "", autoRejoin = true, autoStart = false, sea = "Second Sea",
         flyOver = false, ignoreStrikes = false,   -- test account only: hover over walls on a trip, keep going after a game strike
     },
@@ -1218,8 +1218,17 @@ do
     end
 
     -- weapon: keep a weapon in hand; else the best one in the Backpack (v1 order: the stat behind it decides)
+    -- (v2_47) the kind of a weapon tool: "Fruit", "Melee" or "Sword" (anything else in Weapons; guns are not told apart yet)
+    function Fi.kindOf(t)
+        if not t or not t:IsA("Tool") or t:GetAttribute("Category") ~= "Weapons" then return nil end
+        if t:GetAttribute("devilFruit") then return "Fruit" end
+        if t:GetAttribute("MeleeTool") then return "Melee" end
+        return "Sword"
+    end
     local function weaponRank(t)
         if not t:IsA("Tool") or t:GetAttribute("Category") ~= "Weapons" then return nil end
+        -- (v2_47: Level > Build > Farm with) the chosen kind wins when the account has one
+        if F.cfg.farmWith and F.cfg.farmWith ~= "Auto" and Fi.kindOf(t) == F.cfg.farmWith then return 0 end
         if t:GetAttribute("devilFruit") then return 30 - (tonumber(A.stat("DevilFruitMastery")) or 0) / 10 end
         if t:GetAttribute("MeleeTool") then return 20 - (tonumber(A.stat("Strength")) or 0) / 10 end
         return 15 - (tonumber(A.stat("SwordMastery")) or 0) / 10
@@ -1228,7 +1237,14 @@ do
         local c = A.char()
         if not c then return nil end
         local held = c:FindFirstChildOfClass("Tool")
-        if held and weaponRank(held) then return held end
+        local want = F.cfg.farmWith
+        if held and weaponRank(held) and (not want or want == "Auto" or Fi.kindOf(held) == want) then return held end
+        if held and weaponRank(held) then
+            -- another kind is wanted: switch only when the Backpack has one
+            local has = false
+            for _, t in ipairs(LP.Backpack and LP.Backpack:GetChildren() or {}) do if Fi.kindOf(t) == want then has = true end end
+            if not has then return held end
+        end
         local bp = LP:FindFirstChild("Backpack")
         local pick, best = nil, 99
         for _, t in ipairs(bp and bp:GetChildren() or {}) do
@@ -1410,6 +1426,61 @@ do
     end
     -- sea glide: hover travel over water (and over land in the way) to a far point. Returns ok, why.
     -- Progress line every 30 s. Stops when the distance left has not shrunk by 15 studs in 25 s ("blocked").
+    -- (v2_47) n stat points into one stat: the amount box of the game's Statistics window + the row's own Add button
+    -- (the game's handler sends it). Returns ok, text.
+    function F.spend(name, n)
+        local main = LP.PlayerGui:FindFirstChild("Statistics") and LP.PlayerGui.Statistics:FindFirstChild("Main")
+        local row = main and main:FindFirstChild("Stats") and main.Stats:FindFirstChild(name)
+        local add = row and row:FindFirstChild("Add")
+        local box = main and main:FindFirstChild("TopOptions") and main.TopOptions:FindFirstChild("Base") and main.TopOptions.Base:FindFirstChild("Input")
+        if not add or not box then return false, "no Add button / amount box for " .. tostring(name) end
+        if type(firesignal) ~= "function" then return false, "no firesignal" end
+        local free, was = tonumber(A.stat("SkillPoints")) or 0, tonumber(A.stat(name)) or 0
+        n = math.min(n, free)
+        if n < 1 then return false, "no free points" end
+        box.Text = tostring(n)
+        for _, sig in ipairs({ "Activated", "MouseButton1Click" }) do
+            pcall(function() firesignal(add[sig]) end)
+            task.wait(0.6)
+            if (tonumber(A.stat(name)) or 0) > was then break end
+        end
+        local now = tonumber(A.stat(name)) or 0
+        return now > was, string.format("%s %d -> %d (asked +%d), free %d -> %s", name, was, now, n, free, tostring(A.stat("SkillPoints")))
+    end
+    -- (v2_47) stat plan: of every 6 points 3 go to the stat of the farm weapon, 2 to Defense, 1 to Stamina. The stat that
+    -- is the furthest under its share gets the free points. (No source gives a better numeric early build; own choice.)
+    local STAT_OF = { Melee = "Strength", Sword = "SwordMastery", Gun = "GunMastery", Fruit = "DevilFruitMastery" }
+    function F.statPlan()
+        local kind = F.cfg.farmWith
+        if not kind or kind == "Auto" then
+            local c = A.char()
+            kind = Fi.kindOf(c and c:FindFirstChildOfClass("Tool")) or "Melee"
+        end
+        local main = STAT_OF[kind] or "Strength"
+        local share = { [main] = 3, Defense = 2, Stamina = 1 }
+        local total = 0
+        for s in pairs(share) do total = total + (tonumber(A.stat(s)) or 0) end
+        local free = tonumber(A.stat("SkillPoints")) or 0
+        local pick, gap = nil, -math.huge
+        for s, w in pairs(share) do
+            local g = (total + free) * w / 6 - (tonumber(A.stat(s)) or 0)
+            if g > gap then pick, gap = s, g end
+        end
+        return pick, math.max(1, math.min(free, math.floor(gap + 0.5))), kind, free
+    end
+    task.spawn(function()
+        while F.isAlive() do
+            task.wait(10)
+            if F.cfg.autoStats then
+                local ok, pick, n, kind, free = pcall(F.statPlan)
+                if ok and pick and free > 0 then
+                    local okS, txt = F.spend(pick, n)
+                    log("stats: plan " .. tostring(kind) .. " - " .. tostring(txt))
+                    if not okS then task.wait(60) end
+                end
+            end
+        end
+    end)
     -- (v2_46) the longest stretch of open sea (no ground above the water) on the straight line a -> b, looked at only
     -- within 700 studs of a (farther parts may not be loaded). Sampled every 30 studs.
     function Fi.seaGap(a, b)
@@ -2787,6 +2858,21 @@ do
             end
             pcall(writefile, FOLDER .. "/talks/index_npcs.txt", table.concat(lines, "\n"))
             log(string.format("dumptalks: %d modules written, %d failed, %d NPC models listed", n, fails, #lines))
+        elseif cmd == "stats" then
+            -- stats: the stat rows of the game's Statistics window and the free points
+            local main = LP.PlayerGui:FindFirstChild("Statistics") and LP.PlayerGui.Statistics:FindFirstChild("Main")
+            local st = main and main:FindFirstChild("Stats")
+            if not st then log("stats: the Statistics window is not there") return end
+            local t = {}
+            for _, o in ipairs(st:GetChildren()) do
+                if o:IsA("ImageLabel") then t[#t + 1] = o.Name .. "=" .. tostring(A.stat(o.Name)) .. (o:FindFirstChild("Add") and "" or " (no Add)") end
+            end
+            log("stats: free " .. tostring(A.stat("SkillPoints")) .. " | " .. table.concat(t, ", "))
+        elseif cmd == "spend" then
+            -- spend <Stat> <n>: n points into that stat with the window's own Add button
+            local name, n = arg:match("^(%S+)%s+(%d+)$")
+            if not name then log("spend: use spend <Stat> <n>") return end
+            log("spend: " .. tostring(select(2, F.spend(name, tonumber(n)))))
         elseif cmd == "probe" then
             -- probe: run-state facts (AutoRun game setting, sprint attribute, HoldingRun, _G.running, MoveDirection)
             local c, h = A.char(), A.hum()
@@ -4089,6 +4175,18 @@ UI.dropdown(lq, "Quest", 300, questRows, function() return F.cfg.questPick end, 
 end)
 UI.toggle(lq, "Take quests", function() return F.cfg.takeQuest ~= false end, function(on) F.cfg.takeQuest = on saveAll() end)
 UI.note(lq, "Off = no walk to the NPC: it only fights the mobs of the picked quest (Auto = the best quest of this island).")
+local lb = UI.card(lv, 2, "Build")
+UI.dropdown(lb, "Farm with", 112, function()
+    return { { key = "Auto", text = "Auto  -  best weapon for my stats" }, { key = "Melee", text = "Melee  (fists / fighting style)" },
+        { key = "Sword", text = "Sword" }, { key = "Fruit", text = "Devil fruit" } }
+end, function() return F.cfg.farmWith or "Auto" end, function(k) F.cfg.farmWith = k saveAll() end)
+UI.toggle(lb, "Auto stat points", cfgGet("autoStats"), cfgSet("autoStats"))
+UI.info(lb, "Next points go to", function()
+    local ok, pick, n, kind, free = pcall(F.statPlan)
+    if not ok or not pick then return "-" end
+    return free > 0 and (pick .. " +" .. n .. "  (free " .. free .. ")") or ("no free points  (" .. kind .. " plan)")
+end)
+UI.note(lb, "Plan: of every 6 points, 3 to the stat of the farm weapon, 2 to Defense, 1 to Stamina. Spent points cannot be taken back without a reset item.")
 local ln = UI.card(lv, 2, "Now")
 UI.info(ln, "Picked", function() return F.cfg.questPick == "" and "Auto" or F.cfg.questPick end)
 UI.info(ln, "Step", function() return F.quest and F.quest.state or "-" end)
