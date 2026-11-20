@@ -22,7 +22,7 @@ task.wait(0.3)
 if G.__gpo2_seq ~= MY_SEQ then return end
 
 local FOLDER = "gpo2"
-local VERSION = "v2_10"
+local VERSION = "v2_11"
 local REPO_RAW = "https://raw.githubusercontent.com/moseeri01/gpohub/"
 
 -- exact build: gpo2/want.txt (written at push time) names the commit; GitHub main is cached ~5 min.
@@ -1232,6 +1232,38 @@ do
             F.moveList = { { pos = Vector3.new(tonumber(x), tonumber(y), tonumber(z)), name = "glide", glide = true } }
             F.cfg.mode = "Move test"
             F.start()
+        elseif cmd == "dumptalks" then
+            -- dumptalks: decompile every ModuleScript under ReplicatedStorage.Modules.NPCInteractions (the NPC talk
+            -- scripts with QuestInfo) into gpo2/talks/, plus index.txt with every name and path. Also lists NPC models
+            -- in Workspace.NPCs with their attributes and child names (index_npcs.txt) - some quests may sit there.
+            if type(decompile) ~= "function" then log("dumptalks: this executor has no decompile") return end
+            local root = RS.Modules:FindFirstChild("NPCInteractions")
+            if not root then log("dumptalks: NPCInteractions not found") return end
+            pcall(function() if not isfolder(FOLDER .. "/talks") then makefolder(FOLDER .. "/talks") end end)
+            local index, n, fails = {}, 0, 0
+            for _, o in ipairs(root:GetDescendants()) do
+                if o:IsA("ModuleScript") then
+                    local p = o:GetFullName():gsub("^ReplicatedStorage%.Modules%.NPCInteractions%.", "")
+                    local ok, src = pcall(decompile, o)
+                    if ok and type(src) == "string" then
+                        n = n + 1
+                        pcall(writefile, FOLDER .. "/talks/" .. p:gsub("[^%w%.%-_ ]", "_") .. ".lua", "-- " .. o:GetFullName() .. "\n" .. src)
+                    else fails = fails + 1 end
+                    index[#index + 1] = p .. (ok and "" or "  (decompile failed)")
+                    if n % 20 == 0 then task.wait() end
+                end
+            end
+            pcall(writefile, FOLDER .. "/talks/index.txt", table.concat(index, "\n"))
+            local npcs, lines = workspace:FindFirstChild("NPCs"), {}
+            for _, m in ipairs(npcs and npcs:GetChildren() or {}) do
+                local attrs = {}
+                for k, v in pairs(m:GetAttributes()) do attrs[#attrs + 1] = k .. "=" .. tostring(v) end
+                local kids = {}
+                for _, c in ipairs(m:GetChildren()) do kids[#kids + 1] = c.Name .. ":" .. c.ClassName end
+                lines[#lines + 1] = m.Name .. " | attrs: " .. table.concat(attrs, ", ") .. " | children: " .. table.concat(kids, ", ")
+            end
+            pcall(writefile, FOLDER .. "/talks/index_npcs.txt", table.concat(lines, "\n"))
+            log(string.format("dumptalks: %d modules written, %d failed, %d NPC models listed", n, fails, #lines))
         elseif cmd == "probe" then
             -- probe: run-state facts (AutoRun game setting, sprint attribute, HoldingRun, _G.running, MoveDirection)
             local c, h = A.char(), A.hum()
