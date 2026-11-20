@@ -29,7 +29,7 @@ task.wait(0.3)
 if G.__gpo2_seq ~= MY_SEQ then return end
 
 local FOLDER = "gpo2"
-local VERSION = "v2_44"
+local VERSION = "v2_46"
 local REPO_RAW = "https://raw.githubusercontent.com/moseeri01/gpohub/"
 
 -- exact build: gpo2/want.txt (written at push time) names the commit; GitHub main is cached ~5 min.
@@ -167,6 +167,23 @@ do
         F.conns[#F.conns + 1] = o:GetAttributeChangedSignal("MovementCorrection"):Connect(function()
             F.corrections = (F.corrections or 0) + 1
             log("SERVER CORRECTION (" .. who .. "): " .. tostring(o:GetAttribute("MovementCorrection")):sub(1, 200))
+            -- speed guard (v2_45): 20:26 and 20:56 the account was kicked after ~9 corrections in 4-5 min of fighting at
+            -- hover speed 60. Three corrections inside 2 minutes = the hover / sea speed is cut to 60 % (not below 15).
+            F.corrTimes = F.corrTimes or {}
+            table.insert(F.corrTimes, os.clock())
+            while #F.corrTimes > 0 and os.clock() - F.corrTimes[1] > 120 do table.remove(F.corrTimes, 1) end
+            if #F.corrTimes >= 3 then
+                F.corrTimes = {}
+                local key = (F.fight and F.fight.hv and F.fight.hv.sea) and "seaSpeed" or "hoverSpeed"
+                local was = tonumber(F.cfg[key]) or 15
+                if was > 15 then
+                    F.cfg[key] = math.max(15, math.floor(was * 0.6))
+                    pcall(saveAll)
+                    F.speedCut = string.format("%s %d -> %d (%s)", key, was, F.cfg[key], os.date("%H:%M"))
+                    log("speed guard: 3 server corrections in 2 min - " .. F.speedCut)
+                    pcall(function() notify("Too fast - the game pulled you back 3 times. Speed lowered to " .. F.cfg[key]) end)
+                end
+            end
         end)
     end
     watch(LP, "player")
@@ -378,14 +395,26 @@ if game.PlaceId == MENU_PLACE then
                 box:CaptureFocus() box.Text = F.cfg.privateCode box:ReleaseFocus(true)
                 log("menu: private code typed")
             else log("menu: code box not found") end
-            task.wait(2.5)
-            press("chooseType.Frame.Options.Regular")
+            -- (v2_46: 11-21 06:33 the type prompt came later than 2.5 s and the press missed it - wait for it, up to 20 s)
+            for _ = 1, 20 do
+                task.wait(1)
+                local o = at("chooseType.Frame.Options.Regular")
+                if o then task.wait(0.5) press("chooseType.Frame.Options.Regular") break end
+            end
         else
             press("Start.Menu.Main.PlayButton")
         end
         for _ = 1, 6 do
             task.wait(2.5)
             if at("ConfirmationPrompt.Main.OptionsFrame." .. sea) then press("ConfirmationPrompt.Main.OptionsFrame." .. sea) break end
+            local of = at("ConfirmationPrompt.Main.OptionsFrame")
+            if of then
+                local names = {}
+                for _, c in ipairs(of:GetChildren()) do if c:IsA("GuiButton") then names[#names + 1] = c.Name end end
+                log("menu: sea prompt has no \"" .. tostring(sea) .. "\" - options: " .. table.concat(names, ", "))
+                -- (v2_46: a low account has only the first sea) one choice = take it
+                if #names == 1 then press("ConfirmationPrompt.Main.OptionsFrame." .. names[1]) break end
+            end
         end
         flushLog()
     end)
@@ -1381,6 +1410,26 @@ do
     end
     -- sea glide: hover travel over water (and over land in the way) to a far point. Returns ok, why.
     -- Progress line every 30 s. Stops when the distance left has not shrunk by 15 studs in 25 s ("blocked").
+    -- (v2_46) the longest stretch of open sea (no ground above the water) on the straight line a -> b, looked at only
+    -- within 700 studs of a (farther parts may not be loaded). Sampled every 30 studs.
+    function Fi.seaGap(a, b)
+        local rp = RaycastParams.new()
+        rp.FilterType = Enum.RaycastFilterType.Exclude
+        rp.FilterDescendantsInstances = { A.char(), workspace:FindFirstChild("Effects"), workspace:FindFirstChild("gpo2_plat") }
+        rp.IgnoreWater = true
+        local d = Vector3.new(b.X - a.X, 0, b.Z - a.Z)
+        local len = math.min(d.Magnitude, 700)
+        if d.Magnitude < 1 then return 0 end
+        d = d.Unit
+        local gap, run, lastGround, shore = 0, 0, nil, nil
+        for s = 30, len, 30 do
+            local x, z = a.X + d.X * s, a.Z + d.Z * s
+            local sea = type(HV.ocean) == "function" and HV.ocean(x, z) or 0
+            local hit = workspace:Raycast(Vector3.new(x, sea + 400, z), Vector3.new(0, -401, 0), rp)
+            if hit then run = 0 lastGround = hit.Position else run = run + 30 gap = math.max(gap, run) if run >= 150 and not shore then shore = lastGround or a end end
+        end
+        return gap, shore      -- shore = the last ground before the first wide stretch of sea
+    end
     function Fi.seaGlide(pos, opts)
         opts = opts or {}
         local r = A.root()
@@ -1946,7 +1995,7 @@ do
         local sp = sprinting()
         -- v2_24: the owner sets the float speed with a slider (Fight page) to find the limit himself.
         -- Known from the game code: above 16 studs/s without the run state the guard corrects (pull to the ground).
-        HV.ap.MaxVelocity = (HV.sea and F.cfg.seaSpeed) or F.cfg.hoverSpeed or 15      -- (v2_38: own speed for sea travel)
+        HV.ap.MaxVelocity = math.min((HV.sea and F.cfg.seaSpeed) or F.cfg.hoverSpeed or 15, 30)      -- (v2_46: hard cap 30 - speed 60 got the account kicked 3 times, last 11-21 06:32)      -- (v2_38: own speed for sea travel)
         if sp then HV.sprintTicks = (HV.sprintTicks or 0) + 1 else HV.walkTicks = (HV.walkTicks or 0) + 1 end
         if HV.sea and r and typeof(tg) == "Vector3" then
             -- sea travel (v2_13, owner: "float like walking on water"): keep H studs over whatever is below -
@@ -3488,6 +3537,35 @@ do
         return nil
     end
     -- choose the quest to do now
+    -- (v2_46) another island = farther than 1500 studs, or 150+ studs of open sea on the way (cached 8 s per spot)
+    local farC = {}
+    local function far(p)
+        local r = A.root()
+        if not r or not p then return true end
+        if (p - r.Position).Magnitude >= 1500 then return true end
+        if (p - r.Position).Magnitude < 150 then return false end
+        local k = math.floor(p.X) .. "," .. math.floor(p.Z)
+        local c = farC[k]
+        if not c or os.clock() - c.t > 8 or (c.at - r.Position).Magnitude > 60 then
+            local ok, gap = pcall(Fi.seaGap, r.Position, p)
+            c = { t = os.clock(), at = r.Position, far = ok and gap >= 150 }
+            farC[k] = c
+        end
+        return c.far
+    end
+    Q.far = far
+    -- (v2_46b) to another island: the path walk to the shore, then WALK on the local platform (16 min clean on 11-20).
+    -- Not the hover glide: 06:32 and 06:42 it climbed over the town, got a flight strike and the account was kicked.
+    local function cross(npc)
+        local r = A.root()
+        if not r then return false, "no character" end
+        local okG, _, shore = pcall(Fi.seaGap, r.Position, npc)
+        if okG and shore and M.flat(r.Position, shore) > 25 then
+            local okS, whyS = M.walkTo(shore, { near = 12 })
+            log("quest: walk to the shore " .. tostring(okS and "ok" or whyS))
+        end
+        return Fi.platWalk(npc, { near = 40, limit = 3600 })
+    end
     local function pick()
         local r = A.root()
         if not r then return nil end
@@ -3505,7 +3583,7 @@ do
         local s = routeStep(A.level())
         if s and not Q.skip[s.q] or (s and Q.skip[s.q] < os.clock()) then
             local p = npcPos(s.n)
-            if p and (p - r.Position).Magnitude < 1500 then return { q = s.q, n = s.n, m = s.m, a = s.a }, "level route" end
+            if p then return { q = s.q, n = s.n, m = s.m, a = s.a }, far(p) and "level route (other island)" or "level route" end
         end
         -- best quest of this island: NPC known and < 1500, amount > 1 (amount 1 = a boss), mob loaded near its NPC
         local best, bs = nil, math.huge
@@ -3514,7 +3592,7 @@ do
                 local p = npcPos(o.n)
                 if p then
                     local d = (p - r.Position).Magnitude
-                    if d < 1500 then
+                    if not far(p) then
                         local cnt = mobsOf(o.m, p, 400)
                         if cnt > 0 then
                             local score = d - math.min(cnt, o.a) * 40   -- near, with many mobs up
@@ -3532,7 +3610,7 @@ do
         for _, o in ipairs(LOCALQ) do
             if o.a > 1 and not (Q.skip[o.q] and Q.skip[o.q] > os.clock()) then
                 local p = npcPos(o.n)
-                if p and (p - r.Position).Magnitude < nd then near, nd = o, (p - r.Position).Magnitude end
+                if p and (p - r.Position).Magnitude < nd and not far(p) then near, nd = o, (p - r.Position).Magnitude end
             end
         end
         if near then return near, "nearest quest NPC (mobs not loaded from here)" end
@@ -3618,7 +3696,7 @@ do
         if cur == "" or cur == "None" then
             if not npc then setState("NPC unknown", e.n) task.wait(2) return end
             local d = M.flat(r.Position, npc)
-            if d > 1500 then
+            if far(npc) then
                 -- v2_27: the picked quest is on another island. Known way out of Thriller Bark (found 11-20): the dock,
                 -- then west through the gap in the wall, then on the water (the fruit must hold us) to the island.
                 -- Two failed trips = back to Auto, so it does not walk the sea for ever.
@@ -3626,7 +3704,8 @@ do
                 local DOCK, OUT = Vector3.new(9445, 15, -7042), Vector3.new(8800, 0, -7042)
                 local inside = M.flat(r.Position, DOCK) < 2500 and M.flat(r.Position, OUT) > 250
                 local okT, whyT
-                if Fi.logiaOn() == true then
+                -- (v2_46: 11-21 06:40 an account with NO fruit reads Logia = true and took the water walk - the platform glide always)
+                if false then
                     if inside then
                         M.walkTo(DOCK, { near = 8 })
                         Fi.waterWalk(OUT, { near = 30, limit = 120 })
@@ -3638,10 +3717,10 @@ do
                         if not (Fi.plat and Fi.plat.on and Fi.plat.over == "water") then M.walkTo(DOCK, { near = 8 }) end
                         Fi.seaGlide(OUT, { near = 25, keep = true, limit = 600 })
                     end
-                    okT, whyT = Fi.seaGlide(npc, { near = 40, limit = 3600 })
+                    if d < 4000 then okT, whyT = cross(npc) else okT, whyT = Fi.seaGlide(npc, { near = 40, limit = 3600 }) end Q.noMobSince = nil
                 end
                 local r2 = A.root()
-                if not okT and r2 and M.flat(r2.Position, npc) > 1500 then
+                if not okT and r2 and far(npc) then
                     Q.travelFail = (Q.travelFail or 0) + 1
                     log("quest: trip to " .. e.n .. " failed (" .. tostring(whyT) .. "), try " .. Q.travelFail)
                     if Q.travelFail >= 2 then
@@ -3690,7 +3769,9 @@ do
             local waited = os.clock() - Q.noMobSince
             if waited > 60 and cur ~= "" and cur ~= "None" then Q.noMobSince = nil quit("no " .. e.m .. " for 60 s", e) return end
             setState("no " .. e.m .. " loaded", string.format("waiting %.0f s", waited))
-            if npc and M.flat(r.Position, npc) > 60 then M.walkTo(npc, { near = 20 }) else task.wait(1) end
+            -- (v2_46: after a death the respawn can be on another island - the sea glide, not a straight walk into the water)
+            if npc and far(npc) then setState("travelling to " .. e.n, e.q) cross(npc) Q.noMobSince = nil
+            elseif npc and M.flat(r.Position, npc) > 60 then M.walkTo(npc, { near = 20 }) else task.wait(1) end
             return
         end
         Q.noMobSince = nil
@@ -3902,9 +3983,10 @@ UI.stepper(fd, "Retreat below HP %", 10, 80, cfgGet("retreatHp"), cfgSet("retrea
 local fl = UI.card(cb, 2, "Float")
 UI.toggle(fl, "Hover above target", cfgGet("hover"), cfgSet("hover"))
 UI.stepper(fl, "Hover height", 3, 10, cfgGet("hoverHeight"), cfgSet("hoverHeight"))
-UI.slider(fl, "Hover speed", 8, 60, cfgGet("hoverSpeed"), cfgSet("hoverSpeed"), " /s")
+UI.slider(fl, "Hover speed", 8, 30, cfgGet("hoverSpeed"), cfgSet("hoverSpeed"), " /s")
 UI.info(fl, "Pulled back / game notices", function() return (F.fight.hv.pulls or 0) .. "  /  " .. ((F.guardNotes or 0) + (F.strikes or 0)) end)
-UI.note(fl, "Speed 15 is the tested safe value. If the counters go up, that speed is too fast.")
+UI.info(fl, "Speed lowered by the hub", function() return F.speedCut or "no" end)
+UI.note(fl, "Speed 15 is the tested safe value; 60 got the account kicked twice. If the game pulls you back 3 times in 2 minutes the hub lowers the speed by itself.")
 
 -- 3-6 modes of v1 that are not rebuilt in v2 yet: the tab stays, one line says so
 for i, name in ipairs({ "Impel Down", "Boss", "Raids" }) do
@@ -4076,7 +4158,7 @@ end)
 UI.toggle(st, "Cross the water", function() return F.running and F.cfg.mode == "Move test" end, function(on)
     if on then seaGo() elseif F.running and F.cfg.mode == "Move test" then F.stop() end
 end)
-UI.slider(st, "Speed", 15, 60, cfgGet("seaSpeed"), cfgSet("seaSpeed"), " /s")
+UI.slider(st, "Speed", 15, 30, cfgGet("seaSpeed"), cfgSet("seaSpeed"), " /s")
 UI.info(st, "Now", function()
     if not (F.running and F.cfg.mode == "Move test") then return SEA.msg or "not travelling" end
     local r = A.root()
