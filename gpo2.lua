@@ -22,7 +22,7 @@ task.wait(0.3)
 if G.__gpo2_seq ~= MY_SEQ then return end
 
 local FOLDER = "gpo2"
-local VERSION = "v2_1"
+local VERSION = "v2_3"
 local REPO_RAW = "https://raw.githubusercontent.com/moseeri01/gpohub/"
 
 -- exact build: gpo2/want.txt (written at push time) names the commit; GitHub main is cached ~5 min.
@@ -426,6 +426,232 @@ end
 local function cfgSet(key) return function(v) F.cfg[key] = v saveAll() end end
 local function cfgGet(key) return function() return F.cfg[key] end end
 --------------------------------------------------------------------------------
+-- move: walk to a point like a player. Path search + Humanoid:MoveTo along the waypoints, arrival measured flat
+-- (X/Z). Stuck -> Space jump, step sideways, jump + Geppo hop, new path. Never teleports, never changes WalkSpeed.
+-- Every walk ends with one log line: result, distance, time, average speed, how many jumps / hops / re-paths,
+-- and any pull-back seen (a jump of > 8 studs between two frames that we did not make = MovementGuard "Correct").
+--------------------------------------------------------------------------------
+local M = {}
+do
+    local PFS = game:GetService("PathfindingService")
+    local RunService = game:GetService("RunService")
+    local VIM = nil
+    pcall(function() VIM = game:GetService("VirtualInputManager") end)
+
+    local function flat(a, b) return Vector3.new(a.X - b.X, 0, a.Z - b.Z).Magnitude end
+    M.flat = flat
+
+    -- the game's own input callbacks (Backpack.InputCallbacks); the Backpack is new after every respawn
+    function M.input()
+        local bp = LP:FindFirstChild("Backpack")
+        local m = bp and bp:FindFirstChild("InputCallbacks")
+        if not m then return nil end
+        if M.icMod ~= m then
+            local ok, t = pcall(require, m)
+            M.icMod = m
+            M.ic = (ok and type(t) == "table" and type(t.Callbacks) == "table") and t or nil
+            log(M.ic and "input: game callbacks ready" or "input: game callbacks missing")
+        end
+        return M.ic
+    end
+
+    -- jump through the game's Movements script (it owns JumpPower; Humanoid.Jump is mostly ignored)
+    function M.jump()
+        if os.clock() - (M.jumpAt or 0) < 1.15 then return false end
+        M.jumpAt = os.clock()
+        if VIM then
+            task.spawn(function()
+                VIM:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
+                task.wait(0.08)
+                VIM:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
+            end)
+        else
+            local h = A.hum()
+            if h then h.Jump = true end
+        end
+        return true
+    end
+    function M.geppo()
+        local ic = M.input()
+        local g = ic and ic.Callbacks.Geppo
+        if not g then return false end
+        task.spawn(function() g:PC_Activate() end)
+        return true
+    end
+    function M.inAir()
+        local h = A.hum()
+        return h ~= nil and h.FloorMaterial == Enum.Material.Air
+    end
+    -- jump, then up to 3 Geppo while in the air (gets over walls and ledges)
+    function M.hop()
+        M.jumpAt = 0
+        M.jump()
+        task.wait(0.3)
+        local used = 0
+        for _ = 1, 3 do
+            if not M.inAir() then break end
+            if M.geppo() then used = used + 1 end
+            task.wait(0.35)
+        end
+        return used
+    end
+    function M.sidestep(toward, n)
+        local h, r = A.hum(), A.root()
+        if not h or not r then return end
+        local dir = Vector3.new(toward.X - r.Position.X, 0, toward.Z - r.Position.Z)
+        if dir.Magnitude < 0.5 then return end
+        dir = dir.Unit
+        local side = (n % 2 == 0) and 1 or -1
+        local reach = math.min(4 + 2 * math.floor((n - 1) / 2), 12)
+        h:MoveTo(r.Position + Vector3.new(-dir.Z, 0, dir.X) * side * reach - dir * 1.5)
+        task.wait(0.55)
+    end
+
+    -- seats on the road make the character sit and stop: no sitting while we walk
+    local function noSit(on)
+        local h = A.hum()
+        if not h then return end
+        pcall(function()
+            if on and h.Sit then h.Sit = false end
+            h:SetStateEnabled(Enum.HumanoidStateType.Seated, not on)
+        end)
+    end
+
+    local function computePath(from, to)
+        local pts, state = nil, "?"
+        pcall(function()
+            local path = PFS:CreatePath({ AgentRadius = 2.5, AgentHeight = 5, AgentCanJump = true, WaypointSpacing = 6 })
+            path:ComputeAsync(from, to)
+            state = tostring(path.Status):gsub("Enum.PathStatus.", "")
+            if path.Status == Enum.PathStatus.Success then
+                pts = {}
+                for _, w in ipairs(path:GetWaypoints()) do pts[#pts + 1] = w end
+            end
+        end)
+        return pts, state
+    end
+
+    -- walk to pos. opts: near (default 4), limit seconds (default 10 + 1 per 12 studs), stop() -> true to cancel.
+    -- Returns ok, why.
+    function M.walkTo(pos, opts)
+        opts = opts or {}
+        local near = opts.near or 4
+        local h, r = A.hum(), A.root()
+        if not h or not r or h.Health <= 0 then return false, "no character" end
+        local start, t0 = r.Position, os.clock()
+        local dist0 = flat(start, pos)
+        -- v2_2 test 07:41: paths wind (10-12 studs/s average at 15 walk speed) and can detour far, so the hard cap
+        -- is wide; the real stop is "no progress": the distance left has not shrunk by 5 studs in 20 s
+        local limit = opts.limit or (30 + dist0 / 5)
+        local best, bestAt = dist0, os.clock()
+        local st = { jumps = 0, hops = 0, sides = 0, repaths = 0, pulls = 0, maxPull = 0 }
+
+        -- pull-back watch
+        local lastP = r.Position
+        local hb = RunService.Heartbeat:Connect(function()
+            local rr = A.root()
+            if not rr then return end
+            local p = rr.Position
+            local d = (p - lastP).Magnitude
+            if d > 8 then
+                st.pulls = st.pulls + 1
+                if d > st.maxPull then st.maxPull = d end
+                if st.pulls <= 3 then log(string.format("move: PULLED %.0f studs (%.0f,%.0f,%.0f -> %.0f,%.0f,%.0f)", d, lastP.X, lastP.Y, lastP.Z, p.X, p.Y, p.Z)) end
+            end
+            lastP = p
+        end)
+
+        noSit(true)
+        local ok, why = false, "?"
+        local okRun, err = pcall(function()
+            local stuckTotal = 0
+            while true do
+                r = A.root()
+                h = A.hum()
+                if not r or not h or h.Health <= 0 then why = "died" return end
+                if flat(r.Position, pos) <= near then ok, why = true, "arrived" return end
+                local pts, pstate = computePath(r.Position, pos)
+                local list = {}
+                if pts then
+                    for i = 2, #pts do list[#list + 1] = pts[i] end   -- waypoint 1 = our own feet
+                else
+                    list[1] = { Position = pos, Action = Enum.PathWaypointAction.Walk }
+                    if st.repaths == 0 then log("move: no path (" .. pstate .. "), walking straight") end
+                end
+                local blocked = false
+                for _, w in ipairs(list) do
+                    local target = w.Position
+                    if w.Action == Enum.PathWaypointAction.Jump then if M.jump() then st.jumps = st.jumps + 1 end end
+                    local last, stuck = r.Position, 0
+                    while true do
+                        if not F.isAlive() or not F.running then why = "stopped" return end
+                        if opts.stop and opts.stop() then why = "cancelled" return end
+                        r, h = A.root(), A.hum()
+                        if not r or not h or h.Health <= 0 then why = "died" return end
+                        if flat(r.Position, pos) <= near then ok, why = true, "arrived" return end
+                        if flat(r.Position, target) <= 3 then bestAt = os.clock() break end   -- a path point reached counts as progress (detours)
+                        if os.clock() - t0 > limit then why = "timeout" return end
+                        local left = flat(r.Position, pos)
+                        if left < best - 5 then best, bestAt = left, os.clock()
+                        elseif os.clock() - bestAt > 20 then why = string.format("no progress for 20 s (%.0f left)", left) return end
+                        h:MoveTo(target)
+                        task.wait(0.25)
+                        if flat(r.Position, last) < 0.5 then
+                            stuck = stuck + 1
+                            stuckTotal = stuckTotal + 1
+                            if stuck == 2 or stuck == 5 then if M.jump() then st.jumps = st.jumps + 1 end
+                            elseif stuck == 3 or stuck == 6 then st.sides = st.sides + 1 M.sidestep(target, st.sides)
+                            elseif stuck == 8 then st.hops = st.hops + 1 M.hop()
+                            elseif stuck >= 10 then blocked = true break end
+                        else stuck = 0 end
+                        last = r.Position
+                    end
+                    if blocked then break end
+                end
+                if not blocked then
+                    r = A.root()
+                    if r and flat(r.Position, pos) <= near + 2 then ok, why = true, "arrived" return end
+                end
+                st.repaths = st.repaths + 1
+                if st.repaths > 4 then why = "stuck (5 paths tried)" return end
+            end
+        end)
+        if not okRun then why = "error: " .. tostring(err):sub(1, 120) end
+        hb:Disconnect()
+        noSit(false)
+
+        r = A.root()
+        local dt = os.clock() - t0
+        local moved = r and flat(r.Position, start) or 0
+        local left = r and flat(r.Position, pos) or -1
+        log(string.format("move: %s | %.0f -> %.0f studs left in %.1f s (%.1f studs/s) | jumps %d, sidesteps %d, hops %d, new paths %d | pulled back %d (max %.0f)",
+            why, dist0, left, dt, moved / math.max(dt, 0.1), st.jumps, st.sides, st.hops, st.repaths, st.pulls, st.maxPull))
+        return ok, why, st
+    end
+end
+
+-- "Move test" mode: walks the list in F.moveList (filled by the remote commands goto / route), one line per point
+F.moveList = {}
+F.modes["Move test"] = {
+    order = 9,
+    run = function()
+        local list = F.moveList
+        if #list == 0 then setStatus("Move test: no points (remote: goto x y z / route ...)") task.wait(1) return end
+        local pass = 0
+        for i, p in ipairs(list) do
+            if not F.running then break end
+            setStatus(string.format("Move test: point %d/%d %s", i, #list, p.name or ""))
+            local ok, why = M.walkTo(p.pos, { near = 5 })
+            if ok then pass = pass + 1 end
+            log(string.format("movetest: point %d %s -> %s", i, p.name or "", why))
+            if not ok and why ~= "timeout" and why:find("stuck") == nil then break end
+            task.wait(0.5)
+        end
+        log(string.format("movetest: done, %d of %d points reached", pass, #list))
+    end,
+}
+
+--------------------------------------------------------------------------------
 -- remote: lets Claude drive tests from the PC.
 --   gpo2/cmd.txt    : one command per line, read every 2 s, then emptied
 --   gpo2/state.json : written every 2 s
@@ -480,6 +706,20 @@ do
             local ok, src = pcall(function() return readfile(FOLDER .. "/dev.lua") end)
             G.__gpo2_dev = true
             loadAndRun(ok and src, "dev")
+        elseif cmd == "goto" or cmd == "route" then
+            -- goto x y z  |  route x,y,z;x,y,z;...  -> runs mode "Move test" over those points
+            local list = {}
+            for part in (cmd == "goto" and arg or arg:gsub(";", "|")):gmatch("[^|]+") do
+                local x, y, z = part:match("(%-?[%d%.]+)[,%s]+(%-?[%d%.]+)[,%s]+(%-?[%d%.]+)")
+                if x then list[#list + 1] = { pos = Vector3.new(tonumber(x), tonumber(y), tonumber(z)), name = "#" .. (#list + 1) } end
+            end
+            if #list == 0 then log(cmd .. ": no points read") return end
+            F.stop()
+            task.wait(0.3)
+            F.moveList = list
+            F.cfg.mode = "Move test"
+            log(string.format("%s: %d points", cmd, #list))
+            F.start()
         elseif cmd == "close" then
             F.close()
         else
