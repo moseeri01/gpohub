@@ -22,7 +22,7 @@ task.wait(0.3)
 if G.__gpo2_seq ~= MY_SEQ then return end
 
 local FOLDER = "gpo2"
-local VERSION = "v2_6"
+local VERSION = "v2_8"
 local REPO_RAW = "https://raw.githubusercontent.com/moseeri01/gpohub/"
 
 -- exact build: gpo2/want.txt (written at push time) names the commit; GitHub main is cached ~5 min.
@@ -67,7 +67,7 @@ local F = {
     cfg = {
         mode = "Quest",
         reloadOnTeleport = true,
-        hover = false, hoverHeight = 5,
+        hover = false, hoverHeight = 7,
     },
 }
 function F.isAlive() return F.alive and G.__gpo2_seq == MY_SEQ end
@@ -657,7 +657,8 @@ F.modes["Move test"] = {
         for i, p in ipairs(list) do
             if not F.running then break end
             setStatus(string.format("Move test: point %d/%d %s", i, #list, p.name or ""))
-            local ok, why = M.walkTo(p.pos, { near = 5 })
+            local ok, why
+            if p.glide then ok, why = F.fight.glideTo(p.pos, { near = 5 }) else ok, why = M.walkTo(p.pos, { near = 5 }) end
             if ok then pass = pass + 1 end
             log(string.format("movetest: point %d %s -> %s", i, p.name or "", why))
             if not ok and why ~= "timeout" and why:find("stuck") == nil then break end
@@ -825,7 +826,47 @@ do
     Fi.hv = HV
     function Fi.hoverOff()
         if HV.ap then pcall(function() HV.ap:Destroy() end) pcall(function() HV.att:Destroy() end) end
-        HV.ap, HV.att, HV.target = nil, nil, nil
+        HV.ap, HV.att, HV.target, HV.dir = nil, nil, nil, nil
+        pcall(function() A.hum():Move(Vector3.zero, false) end)
+    end
+    -- nothing solid between a and b (characters, mobs and effects ignored); a box sweep about the size of the body
+    function Fi.clearLine(a, b, ignore)
+        local ok, clear = pcall(function()
+            local rp = RaycastParams.new()
+            rp.FilterType = Enum.RaycastFilterType.Exclude
+            rp.FilterDescendantsInstances = { A.char(), workspace:FindFirstChild("NPCs"), workspace:FindFirstChild("Effects"), ignore }
+            local dir = b - a
+            if dir.Magnitude < 1 then return true end
+            local hit = workspace:Blockcast(CFrame.lookAt(a, b), Vector3.new(3, 4, 1), dir, rp)
+            return hit == nil
+        end)
+        return ok and clear
+    end
+    -- glide (hover travel) to a ground point; returns ok, why. Logs time, average speed, run share, pulls.
+    function Fi.glideTo(pos, opts)
+        opts = opts or {}
+        local r = A.root()
+        if not r then return false, "no character" end
+        local t0, start, p0 = os.clock(), r.Position, HV.pulls
+        local s0, w0 = HV.sprintTicks or 0, HV.walkTicks or 0
+        local dist0 = M.flat(start, pos)
+        local ok, why = false, "timeout"
+        local char0 = A.char()
+        while F.running and F.isAlive() do
+            if A.char() ~= char0 then why = "died" break end
+            r = A.root()
+            if not r then why = "no character" break end
+            if M.flat(r.Position, pos) <= (opts.near or 4) then ok, why = true, "arrived" break end
+            if os.clock() - t0 > (opts.limit or (10 + dist0 / 10)) then break end
+            Fi.hoverOn(pos)
+            task.wait(0.2)
+        end
+        Fi.hoverOff()
+        local dt = os.clock() - t0
+        local sT, wT = (HV.sprintTicks or 0) - s0, (HV.walkTicks or 0) - w0
+        log(string.format("glide: %s | %.0f studs in %.1f s (%.1f studs/s) | run state %d%% | pulls %d",
+            why, dist0, dt, dist0 / math.max(dt, 0.1), (sT + wT) > 0 and math.floor(sT / (sT + wT) * 100) or 0, HV.pulls - p0))
+        return ok, why
     end
     function Fi.hoverOn(target)
         HV.target, HV.t = target, os.clock()
@@ -852,16 +893,51 @@ do
             HV.lastP = r.Position
         end)
     end
+    -- v2_7: the guard's speed limit is RunSpeed 25 only while the character has MovementSprintActive = true
+    -- (Rules R:30, MG:233), else GroundSpeed 16. v2_6 glided at 22 without it -> the 20-studs "pulls" down to the
+    -- ground (y 66 -> 57) were most likely the guard's Correct back to the last ground spot. So: ask the game to run
+    -- (the same Run call as a double W) and glide at 24 only while the attribute is on, else 15.
+    local function sprinting()
+        local c = A.char()
+        return c ~= nil and c:GetAttribute("MovementSprintActive") == true
+    end
+    Fi.sprinting = sprinting
+    local function askRun()
+        if sprinting() or os.clock() - (HV.runAt or 0) < 1 then return end
+        HV.runAt = os.clock()
+        local ic = M.input()
+        local run = ic and ic.Callbacks.Run
+        if not run then return end
+        task.spawn(function() run.HoldingRun = true run:PC_Activate() end)
+    end
     F.conns[#F.conns + 1] = game:GetService("RunService").Heartbeat:Connect(function()
         if not HV.ap then return end
         local tg = HV.target
-        local hr = tg and tg:FindFirstChild("HumanoidRootPart")
-        local th = tg and tg:FindFirstChildOfClass("Humanoid")
-        -- ends by itself: Stop, target gone, or no fight beat for 1.5 s
-        if not F.running or not hr or not th or th.Health <= 0 or os.clock() - HV.t > 1.5 then Fi.hoverOff() return end
-        local bob = math.sin(os.clock() * math.pi) * 2          -- 2 s period, +-2 studs
-        HV.ap.Position = hr.Position + Vector3.new(0, (F.cfg.hoverHeight or 5) + bob, 0)
-        local r = A.root()
+        -- target = a mob (fight) or a Vector3 point on the ground (glide travel)
+        local goal
+        if typeof(tg) == "Vector3" then
+            goal = tg
+        else
+            local hr = tg and tg:FindFirstChild("HumanoidRootPart")
+            local th = tg and tg:FindFirstChildOfClass("Humanoid")
+            if hr and th and th.Health > 0 then goal = hr.Position end
+        end
+        -- ends by itself: Stop, target gone, or no beat for 1.5 s
+        if not F.running or not goal or os.clock() - HV.t > 1.5 then Fi.hoverOff() return end
+        -- owner 11-20: steady height, no bob (the guard's hover rule only writes a warning, MG:1013)
+        local r, h = A.root(), A.hum()
+        -- v2_8 probe: AutoRun is on but the game never starts running while MoveDirection is 0 (the AlignPosition
+        -- moves us, not the Humanoid). Give the Humanoid the same direction as walk input (Humanoid:Move), so the
+        -- game's own AutoRun / Run sees a moving player.
+        if r and h then
+            local dir = Vector3.new(goal.X - r.Position.X, 0, goal.Z - r.Position.Z)
+            HV.dir = dir.Magnitude > 3 and dir.Unit or Vector3.zero   -- applied in the render step below
+        end
+        askRun()
+        local sp = sprinting()
+        HV.ap.MaxVelocity = sp and 24 or 15
+        if sp then HV.sprintTicks = (HV.sprintTicks or 0) + 1 else HV.walkTicks = (HV.walkTicks or 0) + 1 end
+        HV.ap.Position = goal + Vector3.new(0, F.cfg.hoverHeight or 7, 0)
         if r and HV.lastP then
             local d = (r.Position - HV.lastP).Magnitude
             if d > 8 then
@@ -870,6 +946,18 @@ do
             end
         end
         HV.lastP = r and r.Position
+    end)
+
+    -- the player control script calls Humanoid:Move(keyboard input) every render step; ours runs right after it
+    pcall(function()
+        local RunS = game:GetService("RunService")
+        pcall(function() RunS:UnbindFromRenderStep("gpo2_move") end)
+        RunS:BindToRenderStep("gpo2_move", Enum.RenderPriority.Character.Value + 1, function()
+            if HV.ap and HV.dir then
+                local h = A.hum()
+                if h then h:Move(HV.dir, false) end
+            end
+        end)
     end)
 
     -- back off: walk away from the enemy and wait until HP is back above `back` %
@@ -908,7 +996,9 @@ do
             F.status = string.format("Fighting %s (%d hp)", m.Name, mh.Health)
 
             local d = (hr.Position - r.Position).Magnitude
-            local hovering = opts.hover and d <= 60
+            -- v2_7: glide up to 150 studs. v2_8 test 08:47: a straight glide stuck on a cliff wall for a minute ->
+            -- glide only with a clear line from us to the hover spot; else walk (the path goes around)
+            local hovering = opts.hover and (d <= 12 or (d <= 150 and Fi.clearLine(r.Position, hr.Position + Vector3.new(0, F.cfg.hoverHeight or 7, 0), m)))
             if hovering then
                 Fi.hoverOn(m)          -- the AlignPosition carries us there (22 studs/s max)
                 task.wait(0.1)
@@ -966,7 +1056,8 @@ F.modes["Fight test"] = {
         if not r then return end
         local home = r.Position
         local kills, deaths, t0 = 0, 0, os.clock()
-        local s0 = { swings = Fi.st.swings, air = Fi.st.airSwings, blocks = Fi.st.blocks, retreats = Fi.st.retreats, pulls = Fi.hv.pulls }
+        local s0 = { swings = Fi.st.swings, air = Fi.st.airSwings, blocks = Fi.st.blocks, retreats = Fi.st.retreats, pulls = Fi.hv.pulls,
+            spT = Fi.hv.sprintTicks or 0, wkT = Fi.hv.walkTicks or 0, corr = F.corrections or 0 }
         local idleSince = nil
         while F.running and F.isAlive() and kills < F.cfg.fightCount do
             local h = A.hum()
@@ -1003,9 +1094,10 @@ F.modes["Fight test"] = {
             end
         end
         Fi.hoverOff()
-        log(string.format("fighttest: done | kills %d, deaths %d in %.0f s | swings %d, too far %d, blocks %d, retreats %d | hover %s, hover pulls %d",
+        local spT, wkT = (Fi.hv.sprintTicks or 0) - s0.spT, (Fi.hv.walkTicks or 0) - s0.wkT
+        log(string.format("fighttest: done | kills %d, deaths %d in %.0f s | swings %d, too far %d, blocks %d, retreats %d | hover %s h%d, pulls %d, run state %d%% of hover time | server corrections %d",
             kills, deaths, os.clock() - t0, Fi.st.swings - s0.swings, Fi.st.airSwings - s0.air, Fi.st.blocks - s0.blocks, Fi.st.retreats - s0.retreats,
-            tostring(F.cfg.hover), Fi.hv.pulls - s0.pulls))
+            tostring(F.cfg.hover), F.cfg.hoverHeight, Fi.hv.pulls - s0.pulls, (spT + wkT) > 0 and math.floor(spT / (spT + wkT) * 100) or 0, (F.corrections or 0) - s0.corr))
     end,
 }
 
@@ -1090,6 +1182,41 @@ do
             F.cfg.mode = "Fight test"
             log(string.format("fight: %d kills, range %d", F.cfg.fightCount, F.cfg.fightRange))
             F.start()
+        elseif cmd == "set" then
+            -- set <cfg key> <value>: numbers, true/false or text, same type as the current value only
+            local k, v = arg:match("^(%S+)%s+(.+)$")
+            local cur = k and F.cfg[k]
+            if cur == nil then log("set: no setting " .. tostring(k)) return end
+            local nv = v
+            if type(cur) == "number" then nv = tonumber(v) elseif type(cur) == "boolean" then nv = (v == "true" or v == "on") end
+            if nv == nil then log("set: bad value " .. v) return end
+            F.cfg[k] = nv
+            saveAll()
+            log("set " .. k .. " = " .. tostring(nv))
+        elseif cmd == "glide" then
+            -- glide x y z: hover travel to a ground point (runs as mode "Move test" with the glide flag)
+            local x, y, z = arg:match("(%-?[%d%.]+)[,%s]+(%-?[%d%.]+)[,%s]+(%-?[%d%.]+)")
+            if not x then log("glide: no point read") return end
+            F.stop()
+            task.wait(0.3)
+            F.moveList = { { pos = Vector3.new(tonumber(x), tonumber(y), tonumber(z)), name = "glide", glide = true } }
+            F.cfg.mode = "Move test"
+            F.start()
+        elseif cmd == "probe" then
+            -- probe: run-state facts (AutoRun game setting, sprint attribute, HoldingRun, _G.running, MoveDirection)
+            local c, h = A.char(), A.hum()
+            local auto = A.stat("AutoRun", "Settings")
+            local ic = M.input()
+            local blk, cap = "?", "?"
+            pcall(function()
+                local gib = require(RS.Modules.Client.GameplayInputBlocker)
+                blk, cap = tostring(gib.IsBlocked()), tostring(gib.IsCaptured())
+            end)
+            local UIS2 = game:GetService("UserInputService")
+            log(string.format("probe: input blocked %s (captured %s), keys down %d, mouse down %d", blk, cap, #UIS2:GetKeysPressed(), #UIS2:GetMouseButtonsPressed()))
+            log(string.format("probe: AutoRun setting %s | MovementSprintActive %s | HoldingRun %s | _G.running %s | WalkSpeed %s | MoveDirection %s | state %s",
+                tostring(auto), tostring(c and c:GetAttribute("MovementSprintActive")), tostring(ic and ic.Callbacks.Run.HoldingRun),
+                tostring((type(getrenv) == "function" and getrenv()._G or {}).running), tostring(h and h.WalkSpeed), tostring(h and h.MoveDirection), tostring(h and h:GetState())))
         elseif cmd == "ui" then
             -- ui on / ui off: hide the window so a screenshot shows the game
             pcall(function() win.Visible = (arg ~= "off") end)
@@ -1180,6 +1307,7 @@ function F.close()
     F.running = false
     F.alive = false
     pcall(function() F.fight.hoverOff() end)
+    pcall(function() game:GetService("RunService"):UnbindFromRenderStep("gpo2_move") end)
     for _, c in ipairs(F.conns) do pcall(function() c:Disconnect() end) end
     pcall(function() gui:Destroy() end)
     log("closed")
