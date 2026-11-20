@@ -22,7 +22,7 @@ task.wait(0.3)
 if G.__gpo2_seq ~= MY_SEQ then return end
 
 local FOLDER = "gpo2"
-local VERSION = "v2_34"
+local VERSION = "v2_35"
 local REPO_RAW = "https://raw.githubusercontent.com/moseeri01/gpohub/"
 
 -- exact build: gpo2/want.txt (written at push time) names the commit; GitHub main is cached ~5 min.
@@ -3678,6 +3678,56 @@ UI.info(ln, "Skipped for now", function()
     for _, t in pairs(F.quest and F.quest.skip or {}) do if t > os.clock() then n = n + 1 end end
     return n
 end)
+
+-- Sea travel (v2_35, owner 19:05: "make the button first"): walk ON the water to a place. Only places that were
+-- reached in game are listed (the way out of Thriller Bark, Rose Kingdom) + the NPC of the quest picked on this page.
+-- Needs a fruit that stands on water (Logia). Runs as mode "Move test" with the same pieces as the remote commands.
+local SEA = { key = "out" }
+local SEA_DOCK, SEA_OUT = Vector3.new(9445, 15, -7042), Vector3.new(8800, 0, -7042)
+local SEA_PLACES = {
+    { key = "out", text = "Out of Thriller Bark (gap in the wall)" },
+    { key = "rose", text = "Rose Kingdom", pos = Vector3.new(6953, 63, 9940) },
+    { key = "quest", text = "NPC of the picked quest" },
+}
+local function seaGo()
+    local r = A.root()
+    if not r then return end
+    local goal, name = nil, ""
+    for _, pl in ipairs(SEA_PLACES) do if pl.key == SEA.key then goal, name = pl.pos, pl.text end end
+    if SEA.key == "quest" then
+        goal = nil
+        for _, o in ipairs(LOCALQ) do
+            if o.q == F.cfg.questPick and F.quest and F.quest.npcPos then goal = F.quest.npcPos(o.n) name = o.n end
+        end
+        if not goal then notify("Pick a quest in the list first (not Auto)") return end
+    end
+    local list = {}
+    -- inside the wall of Thriller Bark: the dock first, then west through the gap
+    if M.flat(r.Position, SEA_DOCK) < 2500 and M.flat(r.Position, SEA_OUT) > 250 then
+        list[#list + 1] = { pos = SEA_DOCK, name = "Thriller Bark dock" }
+        list[#list + 1] = { pos = SEA_OUT, name = "gap in the wall", water = true }
+    end
+    if goal then list[#list + 1] = { pos = goal, name = name, travel = true } end
+    if #list == 0 then notify("Already outside the wall") return end
+    SEA.goal, SEA.name = list[#list].pos, list[#list].name
+    log("sea travel (window): " .. SEA.name)
+    task.spawn(function()
+        if F.running then F.stop() task.wait(0.4) end
+        F.moveList = list
+        F.cfg.mode = "Move test"
+        F.start()
+    end)
+end
+local st = UI.card(lv, 2, "Sea travel")
+UI.dropdown(st, "Go to", 84, function() return SEA_PLACES end, function() return SEA.key end, function(k) SEA.key = k end)
+UI.button(st, "Walk on the water", "Go", seaGo)
+UI.button(st, "Stop walking", "Stop", function() if F.running and F.cfg.mode == "Move test" then F.stop() end end)
+UI.info(st, "Now", function()
+    if not (F.running and F.cfg.mode == "Move test") then return "not travelling" end
+    local r = A.root()
+    return (SEA.name or "-") .. (r and SEA.goal and string.format("   %d studs left", M.flat(r.Position, SEA.goal)) or "")
+end)
+UI.note(st, "Needs a fruit that stands on water (Logia). After arriving, switch Start on again on Home.")
 
 -- 8 Settings
 local set = UI.page("Settings", 8)
