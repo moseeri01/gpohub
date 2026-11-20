@@ -22,7 +22,7 @@ task.wait(0.3)
 if G.__gpo2_seq ~= MY_SEQ then return end
 
 local FOLDER = "gpo2"
-local VERSION = "v2_35"
+local VERSION = "v2_36"
 local REPO_RAW = "https://raw.githubusercontent.com/moseeri01/gpohub/"
 
 -- exact build: gpo2/want.txt (written at push time) names the commit; GitHub main is cached ~5 min.
@@ -1401,10 +1401,22 @@ do
     -- water walk (v2_14, owner 11-20): cross the sea ON the surface like a Magu player - plain Humanoid:MoveTo,
     -- no AlignPosition, no hover. The game's own WaterLogia script holds a logia user on the water.
     -- Stops at once on: a game strike notice, sinking / swimming, HP loss over 15 %, no progress for 15 s.
+    -- (v2_36, 19:01: the owner pressed Go with the game's Logia mode switched OFF - the character sank and drowned.)
+    -- The game's own setting (the Logia button above the hotbar) = ReplicatedStorage.Stats<name>.Settings.Logia.
+    -- nil = could not read it.
+    function Fi.logiaOn()
+        local v = nil
+        pcall(function() v = RS["Stats" .. LP.Name].Settings.Logia.Value end)
+        return v
+    end
     function Fi.waterWalk(pos, opts)
         opts = opts or {}
         local r, h = A.root(), A.hum()
         if not r or not h then return false, "no character" end
+        if Fi.logiaOn() == false then
+            log("water: Logia mode is OFF (button above the hotbar) - not stepping on the water")
+            return false, "Logia mode is OFF - switch it on with the Logia button"
+        end
         Fi.hoverOff()
         if HV.ocean == nil then
             HV.ocean = false
@@ -3692,6 +3704,7 @@ local SEA_PLACES = {
 local function seaGo()
     local r = A.root()
     if not r then return end
+    if F.fight.logiaOn() == false then notify("Logia mode is OFF - press the Logia button above the hotbar first") return end
     local goal, name = nil, ""
     for _, pl in ipairs(SEA_PLACES) do if pl.key == SEA.key then goal, name = pl.pos, pl.text end end
     if SEA.key == "quest" then
@@ -3720,14 +3733,20 @@ local function seaGo()
 end
 local st = UI.card(lv, 2, "Sea travel")
 UI.dropdown(st, "Go to", 84, function() return SEA_PLACES end, function() return SEA.key end, function(k) SEA.key = k end)
-UI.button(st, "Walk on the water", "Go", seaGo)
-UI.button(st, "Stop walking", "Stop", function() if F.running and F.cfg.mode == "Move test" then F.stop() end end)
+-- (owner 19:03: "an on / off switch is better")
+UI.toggle(st, "Walk on the water", function() return F.running and F.cfg.mode == "Move test" end, function(on)
+    if on then seaGo() elseif F.running and F.cfg.mode == "Move test" then F.stop() end
+end)
+UI.info(st, "Logia mode (game)", function()
+    local v = F.fight.logiaOn()
+    return v == nil and "?" or (v and "ON" or "OFF - cannot walk on water")
+end)
 UI.info(st, "Now", function()
     if not (F.running and F.cfg.mode == "Move test") then return "not travelling" end
     local r = A.root()
     return (SEA.name or "-") .. (r and SEA.goal and string.format("   %d studs left", M.flat(r.Position, SEA.goal)) or "")
 end)
-UI.note(st, "Needs a fruit that stands on water (Logia). After arriving, switch Start on again on Home.")
+UI.note(st, "Needs a Logia fruit with the game's Logia button ON, or the character sinks. After arriving, switch Start on again on Home.")
 
 -- 8 Settings
 local set = UI.page("Settings", 8)
