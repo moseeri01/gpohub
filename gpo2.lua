@@ -22,7 +22,7 @@ task.wait(0.3)
 if G.__gpo2_seq ~= MY_SEQ then return end
 
 local FOLDER = "gpo2"
-local VERSION = "v2_13"
+local VERSION = "v2_14"
 local REPO_RAW = "https://raw.githubusercontent.com/moseeri01/gpohub/"
 
 -- exact build: gpo2/want.txt (written at push time) names the commit; GitHub main is cached ~5 min.
@@ -730,7 +730,8 @@ F.modes["Move test"] = {
             if not F.running then break end
             setStatus(string.format("Move test: point %d/%d %s", i, #list, p.name or ""))
             local ok, why
-            if p.sea then ok, why = F.fight.seaGlide(p.pos, { near = 8 })
+            if p.water then ok, why = F.fight.waterWalk(p.pos, { near = 8 })
+            elseif p.sea then ok, why = F.fight.seaGlide(p.pos, { near = 8 })
             elseif p.glide then ok, why = F.fight.glideTo(p.pos, { near = 5 }) else ok, why = M.walkTo(p.pos, { near = 5 }) end
             if ok then pass = pass + 1 end
             log(string.format("movetest: point %d %s -> %s", i, p.name or "", why))
@@ -992,6 +993,65 @@ do
         local moved = r and M.flat(r.Position, start) or 0
         log(string.format("sea: %s | %.0f of %.0f studs in %.0f s (%.1f studs/s) | lowest y %.0f | hp %d -> %d | pulls %d, climbs %d",
             why, moved, dist0, dt, moved / math.max(dt, 0.1), lowest, hp0, A.hum() and A.hum().Health or 0, HV.pulls - p0, (HV.climbs or 0) - c0))
+        return ok, why
+    end
+    -- water walk (v2_14, owner 11-20): cross the sea ON the surface like a Magu player - plain Humanoid:MoveTo,
+    -- no AlignPosition, no hover. The game's own WaterLogia script holds a logia user on the water.
+    -- Stops at once on: a game strike notice, sinking / swimming, HP loss over 15 %, no progress for 15 s.
+    function Fi.waterWalk(pos, opts)
+        opts = opts or {}
+        local r, h = A.root(), A.hum()
+        if not r or not h then return false, "no character" end
+        Fi.hoverOff()
+        if HV.ocean == nil then
+            HV.ocean = false
+            pcall(function()
+                local om = require(RS.Modules.OceanModule)
+                if type(om.HeightLookup) == "function" then
+                    HV.ocean = function(x, z) local ok, y = pcall(om.HeightLookup, x, z) return ok and tonumber(y) or 0 end
+                end
+            end)
+        end
+        local t0, start, hp0, strikes0, pulls = os.clock(), r.Position, h.Health, F.strikes, 0
+        local dist0 = M.flat(start, pos)
+        local best, bestAt, lastLog, lastP = dist0, os.clock(), os.clock(), r.Position
+        local lowest, onWater = r.Position.Y, 0
+        local ok, why = false, "stopped"
+        local char0 = A.char()
+        while F.running and F.isAlive() do
+            if A.char() ~= char0 then why = "died" break end
+            r, h = A.root(), A.hum()
+            if not r or not h or h.Health <= 0 then why = "died" break end
+            local p = r.Position
+            local left = M.flat(p, pos)
+            local sea = HV.ocean and HV.ocean(p.X, p.Z) or 0
+            lowest = math.min(lowest, p.Y)
+            if (p - lastP).Magnitude > 8 then pulls = pulls + 1 log(string.format("water: PULLED %.0f studs (%.0f,%.0f,%.0f -> %.0f,%.0f,%.0f)", (p - lastP).Magnitude, lastP.X, lastP.Y, lastP.Z, p.X, p.Y, p.Z)) end
+            lastP = p
+            if left <= (opts.near or 8) then ok, why = true, "arrived" break end
+            if F.strikes > strikes0 then why = "GAME STRIKE - stopped" break end
+            if h:GetState() == Enum.HumanoidStateType.Swimming then why = "swimming (not held on the water)" break end
+            if p.Y < sea - 6 then why = string.format("sinking (y %.0f, sea %.0f)", p.Y, sea) break end
+            if h.Health < hp0 - h.MaxHealth * 0.15 then why = string.format("losing HP (%d -> %d)", hp0, h.Health) break end
+            if left < best - 8 then best, bestAt = left, os.clock()
+            elseif os.clock() - bestAt > 15 then why = string.format("blocked (%.0f left)", left) break end
+            if os.clock() - t0 > (opts.limit or (60 + dist0 / 8)) then why = "timeout" break end
+            if math.abs(p.Y - sea) < 6 then onWater = onWater + 1 end
+            if os.clock() - lastLog > 15 then
+                lastLog = os.clock()
+                log(string.format("water: %.0f left | y %.1f (sea %.1f) | floor %s | hp %d | %s | strikes %d, corrections %d",
+                    left, p.Y, sea, h.FloorMaterial.Name, h.Health, tostring(h:GetState()):gsub("Enum.HumanoidStateType.", ""), F.strikes - strikes0, F.corrections or 0))
+            end
+            local d = Vector3.new(pos.X - p.X, 0, pos.Z - p.Z)
+            h:MoveTo(p + d.Unit * math.min(left, 30))
+            task.wait(0.25)
+        end
+        pcall(function() local rr = A.root() if rr then A.hum():MoveTo(rr.Position) end end)
+        r = A.root()
+        local dt = os.clock() - t0
+        local moved = r and M.flat(r.Position, start) or 0
+        log(string.format("water: %s | %.0f of %.0f studs in %.0f s (%.1f studs/s) | on water %.0f s | lowest y %.1f | hp %d -> %d | pulls %d | strikes %d",
+            why, moved, dist0, dt, moved / math.max(dt, 0.1), onWater * 0.25, lowest, hp0, A.hum() and A.hum().Health or 0, pulls, F.strikes - strikes0))
         return ok, why
     end
     function Fi.hoverOn(target)
@@ -1359,6 +1419,19 @@ do
             F.cfg[k] = nv
             saveAll()
             log("set " .. k .. " = " .. tostring(nv))
+        elseif cmd == "water" then
+            -- water x,y,z;x,y,z...: walk ON the sea surface through these points (mode "Move test")
+            local list = {}
+            for part in arg:gmatch("[^;]+") do
+                local x, y, z = part:match("(%-?[%d%.]+)[,%s]+(%-?[%d%.]+)[,%s]+(%-?[%d%.]+)")
+                if x then list[#list + 1] = { pos = Vector3.new(tonumber(x), tonumber(y), tonumber(z)), name = "water #" .. (#list + 1), water = true } end
+            end
+            if #list == 0 then log("water: no points read") return end
+            F.stop()
+            task.wait(0.3)
+            F.moveList = list
+            F.cfg.mode = "Move test"
+            F.start()
         elseif cmd == "glide" or cmd == "sea" then
             -- glide x y z: hover travel to a ground point | sea x y z: hover travel over water (mode "Move test")
             local x, y, z = arg:match("(%-?[%d%.]+)[,%s]+(%-?[%d%.]+)[,%s]+(%-?[%d%.]+)")
