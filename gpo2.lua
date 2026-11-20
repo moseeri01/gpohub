@@ -22,7 +22,7 @@ task.wait(0.3)
 if G.__gpo2_seq ~= MY_SEQ then return end
 
 local FOLDER = "gpo2"
-local VERSION = "v2_36"
+local VERSION = "v2_37"
 local REPO_RAW = "https://raw.githubusercontent.com/moseeri01/gpohub/"
 
 -- exact build: gpo2/want.txt (written at push time) names the commit; GitHub main is cached ~5 min.
@@ -1093,7 +1093,7 @@ F.modes["Move test"] = {
                 ok, why = g ~= nil, g and string.format("opening near %d,%d", g.X, g.Z) or "no opening found"
             elseif p.travel then ok, why = F.fight.travel(p.pos, { near = 10 })
             elseif p.water then ok, why = F.fight.waterWalk(p.pos, { near = 8 })
-            elseif p.sea then ok, why = F.fight.seaGlide(p.pos, { near = 8 })
+            elseif p.sea then ok, why = F.fight.seaGlide(p.pos, { near = p.near or 8 })
             elseif p.glide then ok, why = F.fight.glideTo(p.pos, { near = 5 }) else ok, why = M.walkTo(p.pos, { near = 5 }) end
             if ok then pass = pass + 1 end
             log(string.format("movetest: point %d %s -> %s", i, p.name or "", why))
@@ -1388,6 +1388,27 @@ do
             HV.sea = true
             Fi.hoverOn(pos)
             task.wait(0.2)
+        end
+        -- (v2_37: never switch the hover off over open water unless the game's Logia mode holds us - 19:07 the demo
+        -- ended beside the pier and the character drowned.) No ground within 15 studs below = fly back to the start.
+        r = A.root()
+        if r and A.hum() and A.hum().Health > 0 and A.char() == char0 and Fi.logiaOn() ~= true then
+            local rp = RaycastParams.new()
+            rp.FilterType = Enum.RaycastFilterType.Exclude
+            rp.FilterDescendantsInstances = { A.char(), workspace:FindFirstChild("Effects") }
+            rp.IgnoreWater = true
+            if not workspace:Raycast(r.Position, Vector3.new(0, -15, 0), rp) then
+                log(string.format("sea: no ground under the end point (%s) - flying back to the start", why))
+                local tb = os.clock()
+                HV.sea = true
+                while F.isAlive() and A.char() == char0 and os.clock() - tb < 60 do
+                    r = A.root()
+                    if not r or M.flat(r.Position, start) < 4 then break end
+                    Fi.hoverOn(start)
+                    task.wait(0.2)
+                end
+                ok, why = false, why .. " - no ground there, came back"
+            end
         end
         HV.sea, HV.seaTarget = false, nil
         Fi.hoverOff()
@@ -2381,6 +2402,52 @@ do
         elseif cmd == "craftbait" then
             -- craftbait <Common|Rare|Legendary>: craft at Blacksmith Sen now (test)
             task.spawn(function() F.fishing.craft(arg ~= "" and arg or "Common") end)
+        elseif cmd == "seademo" then
+            -- seademo [studs]: hover out over open water and back to the exact start, at hover speed 15, strikes ignored
+            -- for this one trip so the hover is never switched off over deep water (owner 19:06 / 19:15 wants to see it)
+            local rr = A.root()
+            if not rr then return end
+            local n = math.clamp(tonumber(arg) or 50, 10, 80)
+            local rp = RaycastParams.new()
+            rp.FilterType = Enum.RaycastFilterType.Exclude
+            rp.FilterDescendantsInstances = { A.char(), workspace:FindFirstChild("Effects") }
+            rp.IgnoreWater = true
+            local home = rr.Position
+            if not workspace:Raycast(home, Vector3.new(0, -12, 0), rp) then log("seademo: no ground under the start - not starting") return end
+            -- a direction whose whole line (every 10 studs) is over open water and has nothing in the way
+            local d = nil
+            for a = 0, 345, 15 do
+                local c = Vector3.new(math.cos(math.rad(a)), 0, math.sin(math.rad(a)))
+                local open = true
+                for s = 15, n, 5 do
+                    local q = home + c * s
+                    local hit = workspace:Raycast(Vector3.new(q.X, home.Y + 30, q.Z), Vector3.new(0, -60, 0), rp)
+                    if hit then open = false break end
+                end
+                if open and not workspace:Raycast(home + Vector3.new(0, 2, 0), c * n, rp)
+                    and workspace:Raycast(home - c * 6, Vector3.new(0, -12, 0), rp) and workspace:Raycast(home - c * 2, Vector3.new(0, -12, 0), rp) then d = c break end
+            end
+            if not d then log("seademo: no open water line of " .. n .. " studs from here") return end
+            -- land 2 studs behind the start: the back point is 6 studs inland, reached within 4
+            local back = home - d * 6
+            if not (workspace:Raycast(back, Vector3.new(0, -12, 0), rp) and workspace:Raycast(home - d * 2, Vector3.new(0, -12, 0), rp)) then
+                log("seademo: no ground 2-6 studs behind the start - step back from the edge first") return
+            end
+            F.stop()
+            task.wait(0.3)
+            local wasI, wasS = F.cfg.ignoreStrikes, F.cfg.hoverSpeed
+            F.cfg.ignoreStrikes, F.cfg.hoverSpeed = true, 15
+            local s0 = F.strikes
+            log(string.format("seademo: start %s, out %d studs toward %.0f,%.0f, Logia mode %s", A.posText(), n, d.X * 100, d.Z * 100, tostring(F.fight.logiaOn())))
+            F.moveList = { { pos = home + d * n, name = "demo out", sea = true, near = 4 }, { pos = back, name = "demo back", sea = true, near = 4 } }
+            F.cfg.mode = "Move test"
+            F.start()
+            task.spawn(function()
+                task.wait(1)
+                while F.running and F.isAlive() do task.wait(0.3) end
+                F.cfg.ignoreStrikes, F.cfg.hoverSpeed = wasI, wasS
+                log(string.format("seademo: done, game strikes during the trip %d, now at %s", F.strikes - s0, A.posText()))
+            end)
         elseif cmd == "fishinfo" then
             local fs_ = F.fishing
             local sp = fs_.sen()
