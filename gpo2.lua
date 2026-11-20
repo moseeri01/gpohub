@@ -22,7 +22,7 @@ task.wait(0.3)
 if G.__gpo2_seq ~= MY_SEQ then return end
 
 local FOLDER = "gpo2"
-local VERSION = "v2_33"
+local VERSION = "v2_34"
 local REPO_RAW = "https://raw.githubusercontent.com/moseeri01/gpohub/"
 
 -- exact build: gpo2/want.txt (written at push time) names the commit; GitHub main is cached ~5 min.
@@ -68,7 +68,7 @@ local F = {
         mode = "Quest",
         reloadOnTeleport = true,
         hover = false, hoverHeight = 7, hoverSpeed = 15, useSkills = true, autoBlock = true, retreatHp = 30, sprint = true, hoverSkipKeys = "",
-        questPick = "", fishSellEvery = 20, fishAutoSell = true, fishCraft = "Off", fishKeepLegendary = true, fishBait = "", stopHours = 8,
+        questPick = "", fishSellEvery = 20, fishAutoSell = true, fishCraft = "Common", fishAutoCraft = false, fishKeepLegendary = true, fishBait = "", stopHours = 8,
         privateCode = "", autoRejoin = true, autoStart = false, sea = "Second Sea",
         flyOver = false, ignoreStrikes = false,   -- test account only: hover over walls on a trip, keep going after a game strike
     },
@@ -2853,7 +2853,7 @@ do
                 local price = tonumber((row:FindFirstChild("Price") and row.Price.Text or ""):match("(%d+)")) or 0
                 local tier = price >= 10000 and "Legendary" or (price >= 1000 and "Rare" or "Common")
                 -- kept: legendary fish (switch), and the fish that make the bait picked under "Craft bait" while that bait is not full
-                local forBait = F.cfg.fishCraft == tier and Fs.count and Fs.TIER and Fs.count(Fs.TIER[tier].bait) < 300
+                local forBait = F.cfg.fishAutoCraft and F.cfg.fishCraft == tier and Fs.count and Fs.TIER and Fs.count(Fs.TIER[tier].bait) < 300
                 if (F.cfg.fishKeepLegendary and tier == "Legendary") or forBait then
                     kept = kept + 1
                 else
@@ -2900,13 +2900,24 @@ do
     }
     Fs.TIER = TIER
     local RS = game:GetService("ReplicatedStorage")
+    local INV = nil
+    task.spawn(function() pcall(function() INV = require(RS.Modules.Client.Managers.InventorySnapshotManager) end) end)
+    -- (v2_34: calling the game's module from the window's refresh thread took away that thread's right to write to
+    -- the hub window - every row after it stayed empty. Counts are read by throw-away threads into a cache.)
+    local cache = { ["Common Fish Bait"] = 0, ["Rare Fish Bait"] = 0, ["Legendary Fish Bait"] = 0 }
+    task.spawn(function()
+        while F.isAlive() do
+            if INV then
+                for name in pairs(cache) do
+                    task.spawn(function() pcall(function() cache[name] = tonumber(INV:GetCount(name)) or 0 end) end)
+                end
+            end
+            task.wait(0.5)
+        end
+    end)
     local function count(name)
-        local n = 0
-        pcall(function()
-            local m = require(RS.Modules.Client.Managers.InventorySnapshotManager)
-            n = tonumber(m:GetCount(name)) or 0
-        end)
-        return n
+        if cache[name] == nil then cache[name] = 0 task.wait(0.7) end      -- a new name: wait for one read
+        return cache[name] or 0
     end
     Fs.count = count
     local function sen()
@@ -3003,7 +3014,8 @@ do
 
     F.cfg.fishKeepLegendary = (F.cfg.fishKeepLegendary == nil) and true or F.cfg.fishKeepLegendary
     if F.cfg.fishAutoSell == nil then F.cfg.fishAutoSell = true end
-    F.cfg.fishCraft = F.cfg.fishCraft or "Off"
+    if F.cfg.fishAutoCraft == nil then F.cfg.fishAutoCraft = false end
+    if not F.cfg.fishCraft or F.cfg.fishCraft == "Off" then F.cfg.fishCraft = "Common" end
     F.cfg.fishSellEvery = F.cfg.fishSellEvery or 20
     F.cfg.fishBait = F.cfg.fishBait or ""
     F.modes.Fishing = {
@@ -3016,7 +3028,7 @@ do
             while F.running and F.isAlive() do
                 -- every cfg.fishSellEvery catches: sell at the Fish Buyer (when one is on this island), come back
                 local every = math.max(F.cfg.fishSellEvery, 5)
-                local wantCraft = F.cfg.fishCraft ~= "Off" and Fs.sen()
+                local wantCraft = F.cfg.fishAutoCraft and Fs.sen()
                 local wantSell = F.cfg.fishAutoSell and buyer()
                 if Fs.wins - soldAt >= every and (wantCraft or wantSell) then
                     soldAt = Fs.wins
@@ -3600,10 +3612,10 @@ UI.dropdown(fc, "Bait to use", 112, function()
     return { { key = "", text = "Auto  -  first bait I have" }, { key = "Common Fish Bait", text = "Common Fish Bait" },
         { key = "Rare Fish Bait", text = "Rare Fish Bait" }, { key = "Legendary Fish Bait", text = "Legendary Fish Bait" } }
 end, function() return F.cfg.fishBait end, function(k) F.cfg.fishBait = k saveAll() end)
-UI.info(fc, "Bait in the bag", function()
+UI.info(fc, "Bait: Common / Rare / Legendary", function()
     local c = F.fishing.count
     if not c then return "-" end
-    return "Common " .. c("Common Fish Bait") .. "   Rare " .. c("Rare Fish Bait") .. "   Legendary " .. c("Legendary Fish Bait")
+    return c("Common Fish Bait") .. " / " .. c("Rare Fish Bait") .. " / " .. c("Legendary Fish Bait")
 end)
 UI.note(fc, "Stand next to open water with a rod and bait, then switch on. It casts, waits and plays the catch bar by itself.")
 local fsell = UI.card(fpg, 1, "Selling")
@@ -3613,13 +3625,14 @@ UI.toggle(fsell, "Keep legendary fish", cfgGet("fishKeepLegendary"), cfgSet("fis
 UI.button(fsell, "Sell now", "Sell", function() F.fishing.sell() end)
 UI.note(fsell, "Selling needs a Fish Buyer on this island.")
 local fcr = UI.card(fpg, 2, "Bait crafting")
-UI.dropdown(fcr, "Craft bait", 112, function()
-    return { { key = "Off", text = "Off  -  do not craft" }, { key = "Common", text = "Common Fish Bait  (1 common fish)" },
+UI.toggle(fcr, "Auto craft", cfgGet("fishAutoCraft"), cfgSet("fishAutoCraft"))
+UI.dropdown(fcr, "Bait to craft", 84, function()
+    return { { key = "Common", text = "Common Fish Bait  (1 common fish)" },
         { key = "Rare", text = "Rare Fish Bait  (2 rare fish)" }, { key = "Legendary", text = "Legendary Fish Bait  (1 legendary fish)" } }
 end, function() return F.cfg.fishCraft end, function(k) F.cfg.fishCraft = k saveAll() end)
-UI.button(fcr, "Craft now", "Craft", function() if F.cfg.fishCraft ~= "Off" then task.spawn(F.fishing.craft, F.cfg.fishCraft) end end)
+UI.button(fcr, "Craft now", "Craft", function() task.spawn(F.fishing.craft, F.cfg.fishCraft) end)
 UI.info(fcr, "Crafted this session", function() return F.fishing.crafted or 0 end)
-UI.note(fcr, "Needs Blacksmith Sen on this island. Fish of the picked level are kept for bait (max 300 bait), the rest is sold.")
+UI.note(fcr, "Needs Blacksmith Sen on this island. With Auto craft on, fish of the picked level are kept for bait (max 300), the rest is sold. The game has no bait shop in this sea: bait only comes from crafting.")
 local fst = UI.card(fpg, 2, "This session")
 UI.info(fst, "Caught / lost", function() return (F.fishing.wins or 0) .. "  /  " .. (F.fishing.losses or 0) end)
 UI.info(fst, "Casts", function() return F.fishing.casts or 0 end)
@@ -3687,7 +3700,16 @@ gui.Parent = guiParent
 UI.show("Home")
 task.spawn(function()
     while F.isAlive() do
-        if win.Visible then for _, f in ipairs(UI.refreshers) do pcall(f) end end
+        if win.Visible then
+            -- (v2_34: one line in the log for a row that fails, and for the first full pass - rows stayed empty in v2_33)
+            for i, f in ipairs(UI.refreshers) do
+                UI.refreshAt = i
+                local ok, err = xpcall(f, debug.traceback)
+                UI.refreshBad = UI.refreshBad or {}
+                if not ok and not UI.refreshBad[i] then UI.refreshBad[i] = true log("ui: row " .. i .. " of " .. #UI.refreshers .. " failed: " .. tostring(err):sub(1, 400)) end
+            end
+            if not UI.refreshDone then UI.refreshDone = true log("ui: first full refresh, " .. #UI.refreshers .. " rows") end
+        end
         task.wait(0.5)
     end
 end)
