@@ -22,7 +22,7 @@ task.wait(0.3)
 if G.__gpo2_seq ~= MY_SEQ then return end
 
 local FOLDER = "gpo2"
-local VERSION = "v2_31"
+local VERSION = "v2_32"
 local REPO_RAW = "https://raw.githubusercontent.com/moseeri01/gpohub/"
 
 -- exact build: gpo2/want.txt (written at push time) names the commit; GitHub main is cached ~5 min.
@@ -3334,11 +3334,31 @@ local function questList()
     for i, n in ipairs(names) do questNames[i] = n end
     return questNames
 end
+-- v2_32 (owner 18:36: "Reload gave an older version"): GitHub serves main/gpo2.lua from a cache for ~5 minutes, so
+-- right after a push "main" is still the old file. Reload now asks GitHub for the newest commit id and loads the
+-- file of exactly that commit (never cached); gpo2/want.txt (written on this PC at push time) is used first.
 local function reloadHub()
     G.__gpo2_dev = nil
-    local ok, src = pcall(function() return game:HttpGet(REPO_RAW .. "main/gpo2.lua?t=" .. tostring(os.time())) end)
+    local sha = nil
+    pcall(function()
+        local w = isfile and isfile(FOLDER .. "/want.txt") and readfile(FOLDER .. "/want.txt") or ""
+        sha = w:match("^%s*([0-9a-f]+)%s*$")
+    end)
+    pcall(function()
+        local body = game:HttpGet("https://api.github.com/repos/moseeri01/gpohub/commits?path=gpo2.lua&per_page=1&t=" .. tostring(os.time()))
+        local list = HttpService:JSONDecode(body)
+        local s = type(list) == "table" and list[1] and list[1].sha
+        if type(s) == "string" and #s >= 7 then sha = s end
+    end)
+    local ref = (sha and #sha >= 7) and sha or "main"
+    local ok, src = pcall(function() return game:HttpGet(REPO_RAW .. ref .. "/gpo2.lua?t=" .. tostring(os.time())) end)
     local fn = ok and type(src) == "string" and #src > 1000 and loadstring(src) or nil
-    if fn then flushLog() task.spawn(fn) else notify("reload failed") end
+    if fn then
+        if ref ~= "main" then G.__gpo2_commit = ref end
+        log("reload: loading " .. ref:sub(1, 7))
+        flushLog()
+        task.spawn(fn)
+    else notify("reload failed") end
 end
 -- "Stop after (hours)" from v1: counts from the first Start of this hub
 task.spawn(function()
