@@ -29,7 +29,7 @@ task.wait(0.3)
 if G.__gpo2_seq ~= MY_SEQ then return end
 
 local FOLDER = "gpo2"
-local VERSION = "v2_41"
+local VERSION = "v2_43"
 local REPO_RAW = "https://raw.githubusercontent.com/moseeri01/gpohub/"
 
 -- exact build: gpo2/want.txt (written at push time) names the commit; GitHub main is cached ~5 min.
@@ -75,7 +75,7 @@ local F = {
         mode = "Quest",
         reloadOnTeleport = true,
         hover = false, hoverHeight = 7, hoverSpeed = 15, useSkills = true, autoBlock = true, retreatHp = 30, sprint = true, hoverSkipKeys = "",
-        questPick = "", fishSellEvery = 20, fishAutoSell = true, seaSpeed = 30, plat = false, fishCraft = "Common", fishAutoCraft = false, fishKeepLegendary = true, fishBait = "", stopHours = 8,
+        questPick = "", fishSellEvery = 20, fishAutoSell = true, seaSpeed = 30, takeQuest = true, plat = false, fishCraft = "Common", fishAutoCraft = false, fishKeepLegendary = true, fishBait = "", stopHours = 8,
         privateCode = "", autoRejoin = true, autoStart = false, sea = "Second Sea",
         flyOver = false, ignoreStrikes = false,   -- test account only: hover over walls on a trip, keep going after a game strike
     },
@@ -1655,7 +1655,8 @@ do
     -- off: only over real ground or with the game's Logia mode on (anything else = the character sinks)
     function Fi.platOff(force)
         if not PL.on then return true end
-        if not force and PL.over ~= "land" and Fi.logiaOn() ~= true then return false, "over water - go on land first" end
+        -- (v2_43: no Logia exception - 20:17 the owner switched it off over water with Logia mode reading ON and sank)
+        if not force and PL.over ~= "land" then return false, "over water - go on land first" end
         if PL.conn then PL.conn:Disconnect() PL.conn = nil end
         pcall(function() PL.part:Destroy() end)
         PL.on, PL.part = false, nil
@@ -3537,6 +3538,12 @@ do
 
     local lastQuest = ""   -- the quest seen last tick ("" after a quit, so a quit is not counted as done)
     local function takeQuest(e)
+        -- face the NPC first (turning on the spot)
+        pcall(function()
+            local r, p = A.root(), npcPos(e.n)
+            if r and p then r.CFrame = CFrame.lookAt(r.Position, Vector3.new(p.X, r.Position.Y, p.Z)) end
+        end)
+        task.wait(0.3)
         local ok, err = pcall(function()
             local qf = require(RS.Modules.NPCInteractions.QuestFunctions)
             qf:QuestHandle(e.q, "takequest")
@@ -3614,11 +3621,22 @@ do
                 -- Two failed trips = back to Auto, so it does not walk the sea for ever.
                 setState("travelling to " .. e.n, string.format("%s, %.0f studs", e.q, d))
                 local DOCK, OUT = Vector3.new(9445, 15, -7042), Vector3.new(8800, 0, -7042)
-                if M.flat(r.Position, DOCK) < 2500 and M.flat(r.Position, OUT) > 250 then
-                    M.walkTo(DOCK, { near = 8 })
-                    Fi.waterWalk(OUT, { near = 30, limit = 120 })
+                local inside = M.flat(r.Position, DOCK) < 2500 and M.flat(r.Position, OUT) > 250
+                local okT, whyT
+                if Fi.logiaOn() == true then
+                    if inside then
+                        M.walkTo(DOCK, { near = 8 })
+                        Fi.waterWalk(OUT, { near = 30, limit = 120 })
+                    end
+                    okT, whyT = Fi.travel(npc, { near = 40 })
+                else
+                    -- (v2_42) no fruit / Logia off: the sea glide over the local platform, speed from Level > Sea travel
+                    if inside then
+                        if not (Fi.plat and Fi.plat.on and Fi.plat.over == "water") then M.walkTo(DOCK, { near = 8 }) end
+                        Fi.seaGlide(OUT, { near = 25, keep = true, limit = 600 })
+                    end
+                    okT, whyT = Fi.seaGlide(npc, { near = 40, limit = 3600 })
                 end
-                local okT, whyT = Fi.travel(npc, { near = 40 })
                 local r2 = A.root()
                 if not okT and r2 and M.flat(r2.Position, npc) > 1500 then
                     Q.travelFail = (Q.travelFail or 0) + 1
@@ -3632,11 +3650,13 @@ do
                 else Q.travelFail = 0 end
                 return
             end
-            if d > 9 then
+            -- (v2_42, owner 20:20: "a switch for taking quests") off = no walk to the NPC, no take: just fight this quest's mobs
+            if F.cfg.takeQuest ~= false then
+            if d > 5 then
                 setState("to NPC " .. e.n, string.format("%s, %.0f studs (%s)", e.q, d, why))
                 -- v2_22 (15:49-15:58): after a death it respawned where no path leads to the chosen NPC and tried the
                 -- same walk for 9 minutes. Three failed walks to an NPC = skip that quest for 10 minutes.
-                local okW = M.walkTo(npc, { near = 7 })
+                local okW = M.walkTo(npc, { near = 3.5 })      -- (v2_42: right up to the NPC - it stopped 7-9 studs short)
                 Q.walkFail = Q.walkFail or {}
                 if okW then Q.walkFail[e.q] = 0
                 else
@@ -3652,8 +3672,9 @@ do
             setState("taking " .. e.q)
             if not takeQuest(e) then Q.skip[e.q] = os.clock() + 60 end
             return
+            end
         end
-        if cur ~= e.q then
+        if cur ~= e.q and cur ~= "" and cur ~= "None" then
             -- a quest we do not know (taken by hand, or not a Defeat quest): drop it
             quit("not a quest this mode can do", { q = cur })
             return
@@ -3664,7 +3685,7 @@ do
         if not m then
             Q.noMobSince = Q.noMobSince or os.clock()
             local waited = os.clock() - Q.noMobSince
-            if waited > 60 then Q.noMobSince = nil quit("no " .. e.m .. " for 60 s", e) return end
+            if waited > 60 and cur ~= "" and cur ~= "None" then Q.noMobSince = nil quit("no " .. e.m .. " for 60 s", e) return end
             setState("no " .. e.m .. " loaded", string.format("waiting %.0f s", waited))
             if npc and M.flat(r.Position, npc) > 60 then M.walkTo(npc, { near = 20 }) else task.wait(1) end
             return
@@ -3981,6 +4002,8 @@ UI.dropdown(lq, "Quest", 300, questRows, function() return F.cfg.questPick end, 
     saveAll()
     log("quest picked in the window: " .. (key == "" and "Auto" or key))
 end)
+UI.toggle(lq, "Take quests", function() return F.cfg.takeQuest ~= false end, function(on) F.cfg.takeQuest = on saveAll() end)
+UI.note(lq, "Off = no walk to the NPC: it only fights the mobs of the picked quest (Auto = the best quest of this island).")
 local ln = UI.card(lv, 2, "Now")
 UI.info(ln, "Picked", function() return F.cfg.questPick == "" and "Auto" or F.cfg.questPick end)
 UI.info(ln, "Step", function() return F.quest and F.quest.state or "-" end)
@@ -4015,7 +4038,9 @@ local function seaGo()
     local list = {}
     -- inside the wall of Thriller Bark: the dock first, then west through the gap
     if M.flat(r.Position, SEA_DOCK) < 2500 and M.flat(r.Position, SEA_OUT) > 250 then
-        list[#list + 1] = { pos = SEA_DOCK, name = "Thriller Bark dock" }
+        -- (v2_43: already on the water = no walk back to the dock first; that walk was the slow part the owner saw)
+        local pl = F.fight.plat
+        if not (pl and pl.on and pl.over == "water") then list[#list + 1] = { pos = SEA_DOCK, name = "Thriller Bark dock" } end
         list[#list + 1] = { pos = SEA_OUT, name = "gap in the wall", sea = true, keep = true, near = 25, limit = 600 }
     end
     -- (v2_40: from inside the wall the gap is already in the list; from anywhere else the goal itself is the trip)
