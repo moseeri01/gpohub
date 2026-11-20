@@ -22,7 +22,7 @@ task.wait(0.3)
 if G.__gpo2_seq ~= MY_SEQ then return end
 
 local FOLDER = "gpo2"
-local VERSION = "v2_37"
+local VERSION = "v2_39"
 local REPO_RAW = "https://raw.githubusercontent.com/moseeri01/gpohub/"
 
 -- exact build: gpo2/want.txt (written at push time) names the commit; GitHub main is cached ~5 min.
@@ -68,7 +68,7 @@ local F = {
         mode = "Quest",
         reloadOnTeleport = true,
         hover = false, hoverHeight = 7, hoverSpeed = 15, useSkills = true, autoBlock = true, retreatHp = 30, sprint = true, hoverSkipKeys = "",
-        questPick = "", fishSellEvery = 20, fishAutoSell = true, fishCraft = "Common", fishAutoCraft = false, fishKeepLegendary = true, fishBait = "", stopHours = 8,
+        questPick = "", fishSellEvery = 20, fishAutoSell = true, seaSpeed = 30, fishCraft = "Common", fishAutoCraft = false, fishKeepLegendary = true, fishBait = "", stopHours = 8,
         privateCode = "", autoRejoin = true, autoStart = false, sea = "Second Sea",
         flyOver = false, ignoreStrikes = false,   -- test account only: hover over walls on a trip, keep going after a game strike
     },
@@ -385,7 +385,7 @@ if game.PlaceId == MENU_PLACE then
 elseif F.cfg.autoStart then
     -- Start again by itself after a (re)join (set by "set autoStart true")
     task.delay(12, function()
-        if F.isAlive() and not F.running and F.start then log("autostart: " .. F.cfg.mode) F.start() end
+        if F.isAlive() and not F.running and F.cfg.mode ~= "Move test" and F.start then log("autostart: " .. F.cfg.mode) F.start() end
     end)
 end
 
@@ -621,31 +621,54 @@ function UI.dropdown(card, text, height, getItems, getKey, onPick)
         local items = getItems()
         local cur = getKey()
         local s = {}
-        for i, it in ipairs(items) do s[i] = it.text end
+        -- (v2_39) an item may be a group header ({ header = true, text = }) or carry sub (a second small line),
+        -- right (text at the right edge), dim (greyed) and short (the text shown in the closed row)
+        for i, it in ipairs(items) do s[i] = it.text .. "~" .. tostring(it.sub) .. "~" .. tostring(it.right) .. "~" .. tostring(it.dim) end
         s = table.concat(s, "|")
         if s ~= sig then
             sig = s
-            for _, x in ipairs(rows) do x:Destroy() end
+            for _, x in ipairs(rows) do x.btn:Destroy() end
             rows = {}
             for i, it in ipairs(items) do
-                local x = new("TextButton", { AutoButtonColor = false, Text = "  " .. it.text, TextSize = 13, Font = Enum.Font.Gotham, TextColor3 = T.text,
-                    TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, BackgroundColor3 = T.off, BorderSizePixel = 0,
-                    Size = UDim2.new(1, -8, 0, 26), LayoutOrder = i }, sf)
-                corner(x, 5)
-                x:SetAttribute("key", it.key)
-                x.MouseButton1Click:Connect(function() pcall(onPick, it.key) setOpen(false) paint() end)
-                rows[i] = x
+                if it.header then
+                    local hd = label(sf, it.text, 11, T.mute, Enum.Font.GothamBold, { Size = UDim2.new(1, -8, 0, 22), LayoutOrder = i })
+                    new("UIPadding", { PaddingLeft = UDim.new(0, 4) }, hd)
+                    rows[#rows + 1] = { btn = hd }
+                else
+                    local x = new("TextButton", { AutoButtonColor = false, Text = "", BackgroundColor3 = T.off, BorderSizePixel = 0,
+                        Size = UDim2.new(1, -8, 0, it.sub and 42 or 26), LayoutOrder = i }, sf)
+                    corner(x, 5)
+                    local main = label(x, it.text, 13, it.dim and T.mute or T.text, Enum.Font.GothamMedium, { Size = UDim2.new(1, -20, 0, 20),
+                        Position = UDim2.new(0, 10, 0, 3), TextTruncate = Enum.TextTruncate.AtEnd })
+                    local sub, right = nil, nil
+                    if it.sub then
+                        sub = label(x, it.sub, 12, T.mute, Enum.Font.Gotham, { Size = UDim2.new(0.6, -10, 0, 16), Position = UDim2.new(0, 10, 0, 22),
+                            TextTruncate = Enum.TextTruncate.AtEnd })
+                    end
+                    if it.right then
+                        right = label(x, it.right, 12, T.mute, Enum.Font.Gotham, { Size = UDim2.new(0.4, -10, 0, 16), Position = UDim2.new(0.6, 0, 0, it.sub and 22 or 5),
+                            TextXAlignment = Enum.TextXAlignment.Right, TextTruncate = Enum.TextTruncate.AtEnd })
+                    end
+                    x.MouseButton1Click:Connect(function() pcall(onPick, it.key) setOpen(false) paint() end)
+                    rows[#rows + 1] = { btn = x, key = it.key, main = main, sub = sub, right = right, dim = it.dim }
+                end
             end
         end
         local shown = "-"
-        for _, it in ipairs(items) do if it.key == cur then shown = it.text end end
+        for _, it in ipairs(items) do if not it.header and it.key == cur then shown = it.short or it.text end end
         b.Text = shown
         for _, x in ipairs(rows) do
-            local on = x:GetAttribute("key") == cur
-            x.BackgroundColor3 = on and T.accent or T.off
-            x.TextColor3 = on and T.onAccent or T.text
+            if x.main then
+                local on = x.key == cur
+                x.btn.BackgroundColor3 = on and T.accent or T.off
+                x.main.TextColor3 = on and T.onAccent or (x.dim and T.mute or T.text)
+                if x.sub then x.sub.TextColor3 = on and T.onAccent or T.mute end
+                if x.right then x.right.TextColor3 = on and T.onAccent or T.mute end
+            end
         end
     end
+    UI.dropdowns = UI.dropdowns or {}
+    UI.dropdowns[text] = setOpen      -- (remote: open <label>, for screenshots)
     b.MouseButton1Click:Connect(function() setOpen(not sf.Visible) end)
     paint()
     UI.refreshers[#UI.refreshers + 1] = paint
@@ -1093,7 +1116,11 @@ F.modes["Move test"] = {
                 ok, why = g ~= nil, g and string.format("opening near %d,%d", g.X, g.Z) or "no opening found"
             elseif p.travel then ok, why = F.fight.travel(p.pos, { near = 10 })
             elseif p.water then ok, why = F.fight.waterWalk(p.pos, { near = 8 })
-            elseif p.sea then ok, why = F.fight.seaGlide(p.pos, { near = p.near or 8 })
+            elseif p.plat then ok, why = F.fight.platWalk(p.pos, { near = p.near or 6, home = p.home, limit = p.limit })
+            elseif p.seahold then
+                local at = F.fight.seaHold(p.pos, p.home, 90)
+                ok, why = true, at and string.format("first strike after %.1f s", at) or "no strike in 90 s"
+            elseif p.sea then ok, why = F.fight.seaGlide(p.pos, { near = p.near or 8, keep = p.keep, limit = p.limit })
             elseif p.glide then ok, why = F.fight.glideTo(p.pos, { near = 5 }) else ok, why = M.walkTo(p.pos, { near = 5 }) end
             if ok then pass = pass + 1 end
             log(string.format("movetest: point %d %s -> %s", i, p.name or "", why))
@@ -1361,6 +1388,7 @@ do
             end)
             log("sea: ocean height from the game " .. (HV.ocean and string.format("ok (%.1f here)", HV.ocean(r.Position.X, r.Position.Z)) or "NOT available - using y 0"))
         end
+        if Fi.platOn then Fi.platOn() Fi.plat.goal = nil end      -- (v2_38: the local platform is the safety net under the glide)
         local t0, start, p0, c0 = os.clock(), r.Position, HV.pulls, HV.climbs or 0
         local dist0 = M.flat(start, pos)
         local best, bestAt, lastLog = dist0, os.clock(), os.clock()
@@ -1389,10 +1417,15 @@ do
             Fi.hoverOn(pos)
             task.wait(0.2)
         end
+        -- (v2_38: a route point in the middle of the sea - the hover stays on for the next leg)
+        if ok and opts.keep then
+            log(string.format("sea: passed a route point after %.0f s, %.0f studs", os.clock() - t0, dist0))
+            return ok, why
+        end
         -- (v2_37: never switch the hover off over open water unless the game's Logia mode holds us - 19:07 the demo
         -- ended beside the pier and the character drowned.) No ground within 15 studs below = fly back to the start.
         r = A.root()
-        if r and A.hum() and A.hum().Health > 0 and A.char() == char0 and Fi.logiaOn() ~= true then
+        if r and A.hum() and A.hum().Health > 0 and A.char() == char0 and Fi.logiaOn() ~= true and not (Fi.plat and Fi.plat.on) then
             local rp = RaycastParams.new()
             rp.FilterType = Enum.RaycastFilterType.Exclude
             rp.FilterDescendantsInstances = { A.char(), workspace:FindFirstChild("Effects") }
@@ -1419,6 +1452,39 @@ do
             why, moved, dist0, dt, moved / math.max(dt, 0.1), lowest, hp0, A.hum() and A.hum().Health or 0, HV.pulls - p0, (HV.climbs or 0) - c0))
         return ok, why
     end
+    -- sea hold (v2_38, owner 19:14 "measure it"): hover at one point over the water until the game's first flight
+    -- strike (or maxSec), then fly straight back to `home` (a point over ground). Returns seconds to the first strike or nil.
+    function Fi.seaHold(pos, home, maxSec)
+        local s0, t0, firstAt = F.strikes, os.clock(), nil
+        local g0, c0 = F.guardNotes or 0, F.corrections or 0
+        local lastLog = os.clock()
+        while F.running and F.isAlive() and os.clock() - t0 < maxSec do
+            local r, h = A.root(), A.hum()
+            if not r or not h or h.Health <= 0 then break end
+            if F.strikes > s0 then firstAt = os.clock() - t0 break end
+            if os.clock() - lastLog > 10 then
+                lastLog = os.clock()
+                log(string.format("seahold: %.0f s over the water | y %.0f (floor %.0f) | strikes 0 | notices %d | corrections %d | hp %d",
+                    os.clock() - t0, r.Position.Y, HV.seaFloor or 0, (F.guardNotes or 0) - g0, (F.corrections or 0) - c0, h.Health))
+            end
+            HV.sea = true
+            Fi.hoverOn(pos)
+            task.wait(0.2)
+        end
+        log(firstAt and string.format("seahold: FIRST STRIKE after %.1f s - flying back", firstAt) or string.format("seahold: no strike in %.0f s - flying back", os.clock() - t0))
+        local tb = os.clock()
+        while F.isAlive() and os.clock() - tb < 40 do
+            local r = A.root()
+            if not r or M.flat(r.Position, home) < 4 then break end
+            HV.sea = true
+            Fi.hoverOn(home)
+            task.wait(0.2)
+        end
+        HV.sea, HV.seaTarget = false, nil
+        Fi.hoverOff()
+        log(string.format("seahold: back at %s after %.1f s | strikes in total %d", A.posText(), os.clock() - tb, F.strikes - s0))
+        return firstAt
+    end
     -- water walk (v2_14, owner 11-20): cross the sea ON the surface like a Magu player - plain Humanoid:MoveTo,
     -- no AlignPosition, no hover. The game's own WaterLogia script holds a logia user on the water.
     -- Stops at once on: a game strike notice, sinking / swimming, HP loss over 15 %, no progress for 15 s.
@@ -1434,7 +1500,7 @@ do
         opts = opts or {}
         local r, h = A.root(), A.hum()
         if not r or not h then return false, "no character" end
-        if Fi.logiaOn() == false then
+        if Fi.logiaOn() == false and not opts.plat then
             log("water: Logia mode is OFF (button above the hotbar) - not stepping on the water")
             return false, "Logia mode is OFF - switch it on with the Logia button"
         end
@@ -1467,12 +1533,12 @@ do
             if (p - lastP).Magnitude > 8 then pulls = pulls + 1 log(string.format("water: PULLED %.0f studs (%.0f,%.0f,%.0f -> %.0f,%.0f,%.0f)", (p - lastP).Magnitude, lastP.X, lastP.Y, lastP.Z, p.X, p.Y, p.Z)) end
             lastP = p
             if left <= (opts.near or 8) then ok, why = true, "arrived" break end
-            if F.strikes > strikes0 and not F.cfg.ignoreStrikes then why = "GAME STRIKE - stopped" break end
+            if F.strikes > strikes0 and not F.cfg.ignoreStrikes and not opts.noStop then why = "GAME STRIKE - stopped" break end
             if h:GetState() == Enum.HumanoidStateType.Swimming then why = "swimming (not held on the water)" break end
             if p.Y < sea - 6 then why = string.format("sinking (y %.0f, sea %.0f)", p.Y, sea) break end
             -- (HP loss only matters on the water = the fruit does not hold us; on land mobs hit us at the start, 14:00)
-            if math.abs(p.Y - sea) < 6 then
-                if h.Health < (hpWater or h.Health) - h.MaxHealth * 0.15 then why = string.format("losing HP on the water (%d -> %d)", hpWater, h.Health) break end
+            if math.abs(p.Y - sea) < (opts.plat and 16 or 6) and not opts.noStop then
+                if h.Health < (hpWater or h.Health) - h.MaxHealth * (opts.plat and 0.1 or 0.15) then why = string.format("losing HP on the water (%d -> %d)", hpWater, h.Health) break end
                 hpWater = hpWater or h.Health
             else hpWater = nil end
             if left < best - 8 then best, bestAt = left, os.clock()
@@ -1508,6 +1574,75 @@ do
         local moved = r and M.flat(r.Position, start) or 0
         log(string.format("water: %s | %.0f of %.0f studs in %.0f s (%.1f studs/s) | on water %.0f s | lowest y %.1f | hp %d -> %d | pulls %d | strikes %d",
             why, moved, dist0, dt, moved / math.max(dt, 0.1), onWater * 0.25, lowest, hp0, A.hum() and A.hum().Health or 0, pulls, F.strikes - strikes0))
+        return ok, why
+    end
+    -- platform walk (v2_38, owner 19:25: "what if it is done like walking?"): a part that exists only on this client
+    -- sits under the feet a little above the sea and follows the character, so the Humanoid walks / runs on it like
+    -- on ground (the game's own run state, 22 studs/s). No hover, no game remote. Over real ground the part does not
+    -- collide. Near a goal that lies higher (a pier, a shore) the part rises under the feet up to that height.
+    -- The part is never taken away over water, so a stop in mid sea does not drop the character.
+    local PL = { on = false, lift = 0 }
+    Fi.plat = PL
+    function Fi.platOn()
+        if HV.ocean == nil then
+            HV.ocean = false
+            pcall(function()
+                local om = require(RS.Modules.OceanModule)
+                if type(om.HeightLookup) == "function" then
+                    HV.ocean = function(x, z) local ok, y = pcall(om.HeightLookup, x, z) return ok and tonumber(y) or 0 end
+                end
+            end)
+        end
+        if PL.on and PL.part and PL.part.Parent then return end
+        local part = Instance.new("Part")
+        part.Name = "gpo2_plat"
+        part.Anchored, part.CanCollide, part.CanQuery, part.CanTouch = true, false, false, false
+        part.Size = Vector3.new(26, 1, 26)
+        part.Transparency = 0.75
+        part.Material = Enum.Material.SmoothPlastic
+        part.Parent = workspace
+        PL.part, PL.on, PL.lift, PL.over = part, true, 0, "?"
+        local rp = RaycastParams.new()
+        rp.FilterType = Enum.RaycastFilterType.Exclude
+        rp.IgnoreWater = true
+        PL.conn = game:GetService("RunService").Heartbeat:Connect(function(dt)
+            if not F.isAlive() or not part.Parent then
+                if PL.conn then PL.conn:Disconnect() end
+                pcall(function() part:Destroy() end)
+                PL.on = false
+                return
+            end
+            local r = A.root()
+            if not r then return end
+            local p = r.Position
+            local sea = HV.ocean and HV.ocean(p.X, p.Z) or 0
+            local H = F.cfg.platHeight or 5
+            local g = PL.goal
+            local want = 0
+            if g and M.flat(p, g) < 45 and g.Y - 2.7 > sea + H then want = g.Y - 2.7 - (sea + H) end
+            if PL.lift < want then PL.lift = math.min(want, PL.lift + dt * 6) elseif PL.lift > want then PL.lift = math.max(want, PL.lift - dt * 6) end
+            local top = sea + H + PL.lift
+            rp.FilterDescendantsInstances = { A.char(), part, workspace:FindFirstChild("Effects") }
+            local hit = workspace:Raycast(Vector3.new(p.X, p.Y + 2, p.Z), Vector3.new(0, -60, 0), rp)
+            local land = hit and hit.Position.Y > top - 1.2
+            PL.over = land and "land" or "water"
+            part.CanCollide = not land
+            part.CFrame = CFrame.new(p.X, top - 0.5, p.Z)
+        end)
+        log("plat: on (a local part under the feet, " .. (F.cfg.platHeight or 5) .. " studs above the sea)")
+    end
+    -- walk on the platform to pos; on HP loss / a game strike walk back to opts.home (a point on land)
+    function Fi.platWalk(pos, opts)
+        opts = opts or {}
+        Fi.platOn()
+        PL.goal = pos
+        local ok, why = Fi.waterWalk(pos, { near = opts.near or 6, limit = opts.limit, plat = true })
+        if not ok and opts.home and (why:find("HP") or why:find("STRIKE")) then
+            log("plat: " .. why .. " - walking back to the start")
+            PL.goal = opts.home
+            local okB, whyB = Fi.waterWalk(opts.home, { near = 6, plat = true, noStop = true })
+            why = why .. " - walked back (" .. tostring(whyB) .. ")"
+        end
         return ok, why
     end
     -- travel to a far point, across the sea if needed: water walk straight at it; when blocked (a shore, a cliff,
@@ -1777,7 +1912,7 @@ do
         local sp = sprinting()
         -- v2_24: the owner sets the float speed with a slider (Fight page) to find the limit himself.
         -- Known from the game code: above 16 studs/s without the run state the guard corrects (pull to the ground).
-        HV.ap.MaxVelocity = F.cfg.hoverSpeed or 15
+        HV.ap.MaxVelocity = (HV.sea and F.cfg.seaSpeed) or F.cfg.hoverSpeed or 15      -- (v2_38: own speed for sea travel)
         if sp then HV.sprintTicks = (HV.sprintTicks or 0) + 1 else HV.walkTicks = (HV.walkTicks or 0) + 1 end
         if HV.sea and r and typeof(tg) == "Vector3" then
             -- sea travel (v2_13, owner: "float like walking on water"): keep H studs over whatever is below -
@@ -1799,7 +1934,7 @@ do
                     if hit and hit.Position.Y > y then y = hit.Position.Y end
                     return y
                 end
-                local H = F.cfg.seaHeight or 6
+                local H = F.cfg.seaHeight or 8
                 local floorY = math.max(floorAt(p), floorAt(p + dir * 14))
                 local step = math.min(left, 40)
                 -- (a Blockcast that starts touching the wall reports nothing - v2_16 never climbed; rays from a
@@ -2402,7 +2537,7 @@ do
         elseif cmd == "craftbait" then
             -- craftbait <Common|Rare|Legendary>: craft at Blacksmith Sen now (test)
             task.spawn(function() F.fishing.craft(arg ~= "" and arg or "Common") end)
-        elseif cmd == "seademo" then
+        elseif cmd == "seademo" or cmd == "seatime" then
             -- seademo [studs]: hover out over open water and back to the exact start, at hover speed 15, strikes ignored
             -- for this one trip so the hover is never switched off over deep water (owner 19:06 / 19:15 wants to see it)
             local rr = A.root()
@@ -2439,7 +2574,12 @@ do
             F.cfg.ignoreStrikes, F.cfg.hoverSpeed = true, 15
             local s0 = F.strikes
             log(string.format("seademo: start %s, out %d studs toward %.0f,%.0f, Logia mode %s", A.posText(), n, d.X * 100, d.Z * 100, tostring(F.fight.logiaOn())))
-            F.moveList = { { pos = home + d * n, name = "demo out", sea = true, near = 4 }, { pos = back, name = "demo back", sea = true, near = 4 } }
+            if cmd == "seatime" then
+                -- seatime [studs] : hold over the water until the first strike (max 90 s), then back
+                F.moveList = { { pos = home + d * n, name = "hold over the water", seahold = true, home = back } }
+            else
+                F.moveList = { { pos = home + d * n, name = "demo out", sea = true, near = 4 }, { pos = back, name = "demo back", sea = true, near = 4 } }
+            end
             F.cfg.mode = "Move test"
             F.start()
             task.spawn(function()
@@ -2448,6 +2588,49 @@ do
                 F.cfg.ignoreStrikes, F.cfg.hoverSpeed = wasI, wasS
                 log(string.format("seademo: done, game strikes during the trip %d, now at %s", F.strikes - s0, A.posText()))
             end)
+        elseif cmd == "searoute" then
+            -- searoute x,y,z;x,y,z...: hover over the sea through these points without switching the hover off in
+            -- between; game strikes do not stop it (stopping in mid sea = drowning). The last point must be on land.
+            local list = {}
+            for part in arg:gmatch("[^;]+") do
+                local x, y, z = part:match("(%-?[%d%.]+)[,%s]+(%-?[%d%.]+)[,%s]+(%-?[%d%.]+)")
+                if x then list[#list + 1] = { pos = Vector3.new(tonumber(x), tonumber(y), tonumber(z)), name = "sea #" .. (#list + 1), sea = true, keep = true, near = 25, limit = 3600 } end
+            end
+            if #list == 0 then log("searoute: no points read") return end
+            list[#list].keep, list[#list].near = nil, 6
+            F.stop()
+            task.wait(0.3)
+            local was, s0, t0 = F.cfg.ignoreStrikes, F.strikes, os.clock()
+            F.cfg.ignoreStrikes = true
+            F.moveList = list
+            F.cfg.mode = "Move test"
+            F.start()
+            task.spawn(function()
+                task.wait(1)
+                while F.running and F.isAlive() do task.wait(0.5) end
+                F.cfg.ignoreStrikes = was
+                log(string.format("searoute: ended after %.0f s, game strikes %d, now at %s", os.clock() - t0, F.strikes - s0, A.posText()))
+            end)
+        elseif cmd == "platwalk" then
+            -- platwalk x,y,z;x,y,z...: walk on the local platform through these points (mode "Move test");
+            -- HP loss / a game strike = walk back to where we stand now
+            local rr = A.root()
+            if not rr then return end
+            local list, home = {}, rr.Position
+            for part in arg:gmatch("[^;]+") do
+                local x, y, z = part:match("(%-?[%d%.]+)[,%s]+(%-?[%d%.]+)[,%s]+(%-?[%d%.]+)")
+                if x then list[#list + 1] = { pos = Vector3.new(tonumber(x), tonumber(y), tonumber(z)), name = "plat #" .. (#list + 1), plat = true, home = home, limit = 3600 } end
+            end
+            if #list == 0 then log("platwalk: no points read") return end
+            F.stop()
+            task.wait(0.3)
+            F.moveList = list
+            F.cfg.mode = "Move test"
+            F.start()
+        elseif cmd == "open" then
+            -- open <dropdown label>: open that dropdown in the window (for screenshots)
+            local fn = UI.dropdowns and UI.dropdowns[arg]
+            if fn then fn(true) else log("open: no dropdown " .. arg) end
         elseif cmd == "fishinfo" then
             local fs_ = F.fishing
             local sp = fs_.sen()
@@ -3722,29 +3905,45 @@ local lv = UI.page("Level", 2)          -- v2_28: right after Home (owner)
 local lq = UI.card(lv, 1, "Level farm")
 -- v2_27 (owner 18:15: "show the list in order; the one I pick, go there and farm it"): every quest of this sea the
 -- hub can do, sorted by its level, one click = pick. A quest on another island makes the hub travel there first.
+local QEXP = { ["Help Abdul"] = 10000, ["Help Anty"] = 700, ["Help Vi"] = 2000, ["Help Waby"] = 750, ["Help Rice"] = 525, ["Deliver Bean Coffee"] = 800, ["Help Nami"] = 1200, ["Help Captain Malik"] = 700, ["Deliver Civilian Cargo"] = 800, ["Help crim"] = 1000, ["Help Dabo"] = 3000, ["Help Mythra"] = 7000, ["Help Fhan"] = 4000, ["Help becky"] = 2800, ["Help janny"] = 3000, ["Help jenny"] = 1500, ["Deliver to Snaytona"] = 1000, ["Help Miska"] = 2600, ["Help Yourg"] = 1800, ["Help Zanny"] = 3000, ["Deliver to Ego"] = 150, ["Help Admiral Frosty"] = 6000, ["Help Frutose"] = 9000, ["Help Higa"] = 4200, ["Help Pichu"] = 1200, ["Help Wane"] = 2800, ["Help Zhen's Crewmate"] = 4500, ["Help Zen"] = 400, ["Deliver letter to Dave"] = 20, ["Help Admiral Jackson"] = 50000, ["Help Ian"] = 35000, ["Help Marine Scout Milli"] = 55000, ["Help Niki"] = 30000, ["Help PJ"] = 12000, ["Gear2"] = 2000, ["Help Somi"] = 60000, ["Help Warren"] = 40000, ["Help Samira"] = 10000, ["Help Noah"] = 125, ["Find Tina's Clay pot"] = 15, ["Take down Lucid"] = 200, ["hunt egirl"] = 4500, ["Serve Justice"] = 800, ["Help Kevin"] = 200, ["Help Robert"] = 175, ["Find Tysoncat"] = 45, ["Help bibby"] = 1200, ["Help jeff"] = 2000, ["Help musk"] = 1100, ["Help rae"] = 1800, ["Help raze"] = 1400, ["Help vego"] = 750, ["Help viva"] = 1900, ["Help zhen"] = 1700, ["Help gonny"] = 650, ["Help max"] = 800, ["Help Daph"] = 60, ["Help Ronny"] = 80, ["Find Sarah's necklace"] = 90, ["Help Admiral Yon"] = 20000, ["Help Eli"] = 12000, ["Help Jag"] = 12000, ["Help Marine Scout Rae"] = 10000, ["Help Mur"] = 2000, ["Help Poro"] = 800, ["Help Vak"] = 700, ["Deliver water to Devontai"] = 100, ["Free the Captive"] = 18000, ["Shatter the Mirror"] = 30000, ["Clear the Chess Guards"] = 25000, ["End Big Mama"] = 45000, ["Guard at the Glass"] = 25000, ["The Forest Outcast"] = 20000, ["Help Zaki"] = 700, ["Help Zerus"] = 2500 }
+-- v2_39 (owner 19:52: "easier to read when picking"): this island first, other islands under their own header,
+-- two lines per quest (level + name / mob x amount), EXP or the distance at the right, quests above our level dimmed
 local function questRows()
-    local rows = { { key = "", text = "Auto  -  best quest on the island I am on" } }
+    local rows = { { key = "", text = "Auto  -  best quest on this island" } }
     if not (F.quest and F.quest.npcPos) then return rows end
     local r = A.root()
-    local list = {}
+    local lvl = tonumber(A.level()) or 0
+    local here, far = {}, {}
     for _, o in ipairs(LOCALQ) do
         if o.a > 1 and o.m ~= "Kraken" then          -- ("Help Anty / Kraken x3" is a misread awakening step)
             local p = F.quest.npcPos(o.n)
             if p then
                 local lvFrom, lvTo = 999, 999
                 for _, s in ipairs(ROUTE) do if s.q == o.q then lvFrom, lvTo = s.f, s.t break end end
-                local far = r and (p - r.Position).Magnitude > 1500
-                list[#list + 1] = { f = lvFrom, key = o.q,
-                    text = string.format("%s   %s   %s x%d%s", lvFrom < 999 and ("Lv " .. lvFrom .. "-" .. lvTo) or "side", o.q, o.m, o.a, far and "   (other island)" or "") }
+                local dist = r and (p - r.Position).Magnitude or 0
+                local lvText = lvFrom < 999 and ("Lv " .. lvFrom .. "-" .. lvTo) or "Side"
+                local it = { f = lvFrom, key = o.q, text = lvText .. "   " .. o.q, short = lvText .. "  " .. o.q, sub = o.m .. " x" .. o.a,
+                    dim = lvFrom < 999 and lvFrom > lvl }
+                if dist > 1500 then
+                    it.right = comma(math.floor(dist / 100 + 0.5) * 100) .. " studs away"
+                    far[#far + 1] = it
+                else
+                    it.right = QEXP[o.q] and (comma(QEXP[o.q]) .. " EXP") or nil
+                    here[#here + 1] = it
+                end
             end
         end
     end
-    table.sort(list, function(a, b) return a.f < b.f end)
-    for _, it in ipairs(list) do rows[#rows + 1] = it end
+    local function byLv(a, b) return a.f < b.f end
+    table.sort(here, byLv)
+    table.sort(far, byLv)
+    if #here > 0 then rows[#rows + 1] = { header = true, text = "THIS ISLAND" } end
+    for _, it in ipairs(here) do rows[#rows + 1] = it end
+    if #far > 0 then rows[#rows + 1] = { header = true, text = "OTHER ISLANDS  (travel first)" } end
+    for _, it in ipairs(far) do rows[#rows + 1] = it end
     return rows
 end
--- v2_28 (owner 18:20: "a dropdown is better"): one row showing the picked quest; a click opens the list under it
-UI.dropdown(lq, "Quest", 230, questRows, function() return F.cfg.questPick end, function(key)
+UI.dropdown(lq, "Quest", 300, questRows, function() return F.cfg.questPick end, function(key)
     F.cfg.questPick = key
     saveAll()
     log("quest picked in the window: " .. (key == "" and "Auto" or key))
@@ -3771,7 +3970,6 @@ local SEA_PLACES = {
 local function seaGo()
     local r = A.root()
     if not r then return end
-    if F.fight.logiaOn() == false then notify("Logia mode is OFF - press the Logia button above the hotbar first") return end
     local goal, name = nil, ""
     for _, pl in ipairs(SEA_PLACES) do if pl.key == SEA.key then goal, name = pl.pos, pl.text end end
     if SEA.key == "quest" then
@@ -3785,9 +3983,10 @@ local function seaGo()
     -- inside the wall of Thriller Bark: the dock first, then west through the gap
     if M.flat(r.Position, SEA_DOCK) < 2500 and M.flat(r.Position, SEA_OUT) > 250 then
         list[#list + 1] = { pos = SEA_DOCK, name = "Thriller Bark dock" }
-        list[#list + 1] = { pos = SEA_OUT, name = "gap in the wall", water = true }
+        list[#list + 1] = { pos = SEA_OUT, name = "gap in the wall", sea = true, keep = true, near = 25, limit = 600 }
     end
-    if goal then list[#list + 1] = { pos = goal, name = name, travel = true } end
+    if goal then list[#list + 1] = { pos = goal, name = name, sea = true, near = 6, limit = 3600 } end
+    list[#list].keep = nil
     if #list == 0 then notify("Already outside the wall") return end
     SEA.goal, SEA.name = list[#list].pos, list[#list].name
     log("sea travel (window): " .. SEA.name)
@@ -3801,19 +4000,16 @@ end
 local st = UI.card(lv, 2, "Sea travel")
 UI.dropdown(st, "Go to", 84, function() return SEA_PLACES end, function() return SEA.key end, function(k) SEA.key = k end)
 -- (owner 19:03: "an on / off switch is better")
-UI.toggle(st, "Walk on the water", function() return F.running and F.cfg.mode == "Move test" end, function(on)
+UI.toggle(st, "Cross the water", function() return F.running and F.cfg.mode == "Move test" end, function(on)
     if on then seaGo() elseif F.running and F.cfg.mode == "Move test" then F.stop() end
 end)
-UI.info(st, "Logia mode (game)", function()
-    local v = F.fight.logiaOn()
-    return v == nil and "?" or (v and "ON" or "OFF - cannot walk on water")
-end)
+UI.slider(st, "Speed", 15, 60, cfgGet("seaSpeed"), cfgSet("seaSpeed"), " /s")
 UI.info(st, "Now", function()
     if not (F.running and F.cfg.mode == "Move test") then return "not travelling" end
     local r = A.root()
     return (SEA.name or "-") .. (r and SEA.goal and string.format("   %d studs left", M.flat(r.Position, SEA.goal)) or "")
 end)
-UI.note(st, "Needs a Logia fruit with the game's Logia button ON, or the character sinks. After arriving, switch Start on again on Home.")
+UI.note(st, "Glides low over the sea on a platform only you have - works without a fruit. Speed 15 is the tested value; faster is at your own risk. After arriving, switch Start on again on Home.")
 
 -- 8 Settings
 local set = UI.page("Settings", 8)
