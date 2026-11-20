@@ -25,7 +25,7 @@ while not LP do task.wait(0.2) LP = Players.LocalPlayer end
 task.wait(0.3)
 if G.__gpo_hub_seq ~= MY_SEQ then return end
 local FOLDER = "gpohub"
-local VERSION = "h_13"
+local VERSION = "h_15"
 
 -- Exact build. GitHub serves the main file from a cache for about 5 minutes, so a hub loaded right after a push
 -- can be an older build. gpohub/want.txt (written at push time on this PC) names the commit to run; a hub that
@@ -89,7 +89,7 @@ local F = {
         -- Fishing
         fishSpot = "Rough Waters", fishBait = true, fishSell = true, fishKeepLeg = true, fishMegalodon = false,
         -- Level
-        lvlTarget = 675, lvlQuest = true, lvlMove = true, lvlStats = "Sword / Defense", autoStats = false, lvlHaki = false, lvlBlock = false, hover = false, hoverHeight = 5, lvlKeep = true,
+        lvlTarget = 675, lvlQuest = true, lvlMove = true, lvlStats = "Sword / Defense", autoStats = false, lvlHaki = false, lvlBlock = false, hover = false, hoverHeight = 5, lvlKeep = true, privateCode = "", privateOwn = false,
         -- Settings
         normalSpeed = true, sprint = true, keyWalk = true, geppo = true, stopNearPlayer = true, antiAfk = true, autoRejoin = false,
         discordAlert = false, pickUp = false, webhook = "", bossAlert = true, bossRange = 300, bossSkills = false,
@@ -524,7 +524,19 @@ do
         C.wantSprint = (F.cfg.sprint and r0 ~= nil and (r0.Position - pos).Magnitude > 30) or false
         local ok, res
         if F.cfg.keyWalk and VIM and r0 ~= nil and (r0.Position - pos).Magnitude > 30 then
+            -- h_14 (owner 07:17: "hits a wall and cannot go on"): the key walk only jumps when blocked. When it gives
+            -- up (no path, or 1.2 s without moving) the normal walk takes over: new path, sidestep, Geppo hop.
+            local t0 = os.clock()
             ok, res = pcall(C.keyWalk, pos, near or 4, limit or 20, stop)
+            local rr = C.root()
+            if ok and not res and F.running and C.alive() and rr and not (stop and stop())
+                and Vector3.new(rr.Position.X - pos.X, 0, rr.Position.Z - pos.Z).Magnitude > (near or 4) + 2 then
+                C.blockedWalks = (C.blockedWalks or 0) + 1
+                if C.blockedWalks <= 3 or C.blockedWalks % 20 == 0 then
+                    log(string.format("walk: key walk blocked at %.0f,%.0f,%.0f - path walk takes over (%d)", rr.Position.X, rr.Position.Y, rr.Position.Z, C.blockedWalks))
+                end
+                ok, res = pcall(C.walkInner, pos, near, math.max(6, (limit or 20) - (os.clock() - t0)), stop)
+            end
         else
             ok, res = pcall(C.walkInner, pos, near, limit, stop)
         end
@@ -551,6 +563,7 @@ do
                 for _, w in ipairs(path:GetWaypoints()) do points[#points + 1] = w.Position end
             end
         end)
+        if #points == 1 and flat(r.Position, pos) > 40 then return false end   -- h_14: no path = not a straight W run into walls
         local function press(down) pcall(function() VIM:SendKeyEvent(down, Enum.KeyCode.W, false, game) end) end
         local target, done, t0 = nil, false, os.clock()
         local oldType = cam.CameraType
@@ -585,7 +598,7 @@ do
                         if last and flat(rr.Position, last) < 0.3 then
                             stuck = stuck + 1
                             if stuck >= 4 then C.jump() end
-                            if stuck >= 40 then return end
+                            if stuck >= 12 then return end   -- h_14: was 40 (4 s pushing a wall)
                         else stuck = 0 end
                         last = rr.Position
                     end
@@ -742,6 +755,28 @@ do
         return r ~= nil and flat(r.Position, pos) <= near + 2
     end
 
+    -- h_14: a direction to back off to. Rays at hip height in 8 directions; the score is the free distance (max 60)
+    -- times how much it points away from the danger. So it does not run into the wall behind it.
+    function C.openDir(awayFrom)
+        local r, c = C.root(), LP.Character
+        if not r then return nil end
+        local base = Vector3.new(r.Position.X - awayFrom.X, 0, r.Position.Z - awayFrom.Z)
+        if base.Magnitude < 1 then base = Vector3.new(0, 0, 1) end
+        base = base.Unit
+        local rp = RaycastParams.new()
+        rp.FilterType = Enum.RaycastFilterType.Exclude
+        rp.FilterDescendantsInstances = { c, workspace:FindFirstChild("NPCs") }
+        local best, bestS, bestFree = base, -1, 0
+        for i = 0, 7 do
+            local a = math.rad(i * 45)
+            local d = Vector3.new(base.X * math.cos(a) - base.Z * math.sin(a), 0, base.X * math.sin(a) + base.Z * math.cos(a))
+            local hit = workspace:Raycast(r.Position, d * 60, rp)
+            local free = hit and (hit.Position - r.Position).Magnitude or 60
+            local sc = free * (0.35 + 0.65 * math.max(0, d:Dot(base)))
+            if sc > bestS then best, bestS, bestFree = d, sc, free end
+        end
+        return best, bestFree
+    end
     -- jump the way a player does: the game's Movements script owns jumping (it switches JumpPower between 0 and
     -- 50 and allows one jump a second), so Humanoid.Jump = true is ignored most of the time. A Space key press
     -- goes through that script.
@@ -1155,7 +1190,19 @@ do
                 if not r or (hr.Position - r.Position).Magnitude <= ATK.reach then break end
                 hm:MoveTo(hr.Position)
                 if F.cfg.sprint and (hr.Position - r.Position).Magnitude > 15 then C.sprint(true) end
+                local before = r.Position
                 task.wait(0.15)
+                -- h_14: something is between us and the mob (3 beats without moving) -> path walk with sidestep / hop
+                local r2 = C.root()
+                if r2 and (r2.Position - before).Magnitude < 0.3 then
+                    ATK.chaseStuck = (ATK.chaseStuck or 0) + 1
+                    if ATK.chaseStuck >= 3 then
+                        ATK.chaseStuck = 0
+                        C.noSit(false)
+                        pcall(C.walkInner, hr.Position, ATK.reach, 5, function() return h.Health <= 0 end)
+                        break
+                    end
+                else ATK.chaseStuck = 0 end
             end
             C.noSit(false)
         end
@@ -2115,6 +2162,30 @@ do
             log("resume: Start kept on (" .. F.cfg.mode .. ")")
         end)
     end)
+    -- h_15 Private server (Settings): in the game's menu place the code box calls
+    -- ReplicatedStorage.Events.reserved:InvokeServer(<code>) when the text is entered (menu script reserved.Frame,
+    -- gpohub/src/1730877806/0052). The hub makes the same call with the owner's code, 6 s after the menu loaded.
+    -- "getcode" (the game's own call for the Generate label) gives the account's own code when Settings has no code.
+    if game.PlaceId == 1730877806 then
+        task.delay(6, function()
+            pcall(function()
+                local ev = game:GetService("ReplicatedStorage"):WaitForChild("Events", 10)
+                local rsv = ev and ev:WaitForChild("reserved", 10)
+                if not rsv then log("private: menu has no reserved call") return end
+                local code = F.cfg.privateCode
+                if code == "" and F.cfg.privateOwn then
+                    local own = rsv:InvokeServer("getcode")
+                    log("private: own code " .. ((type(own) == "string" and #own > 0) and ("found (" .. #own .. " chars)") or ("not found: " .. tostring(own))))
+                    if type(own) == "string" then code = own end
+                end
+                if code == "" then log("private: no code set - staying on the menu's normal join") return end
+                local back = rsv:InvokeServer(code)
+                log("private: code entered, menu answered " .. ((back == code) and "the same code (accepted)" or tostring(back):sub(1, 60)))
+            end)
+        end)
+    else
+        log("server: " .. ((game.PrivateServerId ~= "" and "PRIVATE") or "public") .. ", players " .. #Players:GetPlayers())
+    end
     -- h_8 Auto rejoin (Settings): when Roblox shows its error box (lost connection, server shut down, 277 / 279)
     -- join the same game again; the queued loader brings the hub back and Keep Start resumes the farm.
     -- A kick / ban / exploit message is NOT rejoined: Start is turned off and the reason is logged.
@@ -2137,7 +2208,9 @@ do
                 for i = 1, 5 do
                     task.wait(5 + i * 5)
                     log("rejoin: try " .. i)
-                    pcall(function() TS:Teleport(game.PlaceId, LP) end)
+                    -- h_15: with a private server code the way back is the menu place (the code is entered there)
+                    local place = (F.cfg.privateCode ~= "" or F.cfg.privateOwn) and 1730877806 or game.PlaceId
+                    pcall(function() TS:Teleport(place, LP) end)
                 end
             end)
         end)
@@ -2616,9 +2689,9 @@ do
             L.state = "healing"
             F.status = string.format("Low HP (%.0f %%) - backing off", C.hpPct())
             if g then
-                local away = Vector3.new(r.Position.X - g.HumanoidRootPart.Position.X, 0, r.Position.Z - g.HumanoidRootPart.Position.Z)
-                if away.Magnitude < 1 then away = Vector3.new(0, 0, 1) end
-                C.walkTo(r.Position + away.Unit * 60, 8, 6)
+                -- h_14: back off toward open ground, not straight into the wall behind
+                local dir, free = C.openDir(g.HumanoidRootPart.Position)
+                if dir then C.walkTo(r.Position + dir * math.max(10, math.min(60, free - 4)), 8, 6) else task.wait(1) end
             else task.wait(1) end
             return
         end
@@ -3850,6 +3923,13 @@ UI.toggle(sf, "Run like a player (hold W, speed 25)", cfgGet("keyWalk"), cfgSet(
 UI.toggle(sf, "Stop when a player is near", cfgGet("stopNearPlayer"), cfgSet("stopNearPlayer"))
 UI.toggle(sf, "Anti AFK", cfgGet("antiAfk"), cfgSet("antiAfk"))
 UI.toggle(sf, "Auto rejoin", cfgGet("autoRejoin"), cfgSet("autoRejoin"))
+local pv = UI.card(settings, 2, "Private server")
+UI.input(pv, "Code", "the code you type in the game menu", function() return F.cfg.privateCode ~= "" and "(saved)" or "" end, function(v)
+    if type(v) == "string" then F.cfg.privateCode = v:gsub("%s", "") saveAll() end
+end)
+UI.toggle(pv, "No code above: use my own server's code", cfgGet("privateOwn"), cfgSet("privateOwn"))
+UI.info(pv, "This server", function() return (game.PrivateServerId ~= "" and "private" or "public") .. ", " .. #game:GetService("Players"):GetPlayers() .. " player(s)" end)
+UI.note(pv, "The hub enters the code in the game menu by itself. Auto rejoin then also returns to this server.")
 local ex = UI.card(settings, 2, "Extras")
 UI.toggle(ex, "Discord alert: Epic+ drop / boss", cfgGet("discordAlert"), cfgSet("discordAlert"))
 UI.input(ex, "Webhook", "paste your Discord webhook URL", function() return F.cfg.webhook ~= "" and "(saved)" or "" end, function(v)
