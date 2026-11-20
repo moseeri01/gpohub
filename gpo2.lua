@@ -22,7 +22,7 @@ task.wait(0.3)
 if G.__gpo2_seq ~= MY_SEQ then return end
 
 local FOLDER = "gpo2"
-local VERSION = "v2_9"
+local VERSION = "v2_10"
 local REPO_RAW = "https://raw.githubusercontent.com/moseeri01/gpohub/"
 
 -- exact build: gpo2/want.txt (written at push time) names the commit; GitHub main is cached ~5 min.
@@ -162,6 +162,35 @@ do
     watch(LP, "player")
     watch(LP.Character, "character")
     F.conns[#F.conns + 1] = LP.CharacterAdded:Connect(function(c) watch(c, "character") end)
+end
+
+-- after a pull-back: the game's MovementGuard shows "Movement corrected | <reason>" on screen (MG notification).
+-- Read any such text from PlayerGui shortly after, so the log says which rule fired.
+function A.correctionText()
+    local found = nil
+    pcall(function()
+        for _, o in ipairs(LP.PlayerGui:GetDescendants()) do
+            if (o:IsA("TextLabel") or o:IsA("TextButton")) and o.Visible then
+                local t = o.Text
+                -- v2_10: "Movement" alone matched an unrelated "Ocean Movement" label
+                if type(t) == "string" and t:find("orrect") then
+                    found = t:gsub("<[^>]->", ""):sub(1, 120)
+                    break
+                end
+            end
+        end
+    end)
+    return found
+end
+function A.logPullReason(tag)
+    task.spawn(function()
+        for _ = 1, 6 do
+            local t = A.correctionText()
+            if t then log(tag .. " reason on screen: " .. t) return end
+            task.wait(0.25)
+        end
+        log(tag .. " reason on screen: none found")
+    end)
 end
 
 -- come back after a teleport (the executor runs this line in the next server)
@@ -572,7 +601,7 @@ do
             if d > 8 then
                 st.pulls = st.pulls + 1
                 if d > st.maxPull then st.maxPull = d end
-                if st.pulls <= 3 then log(string.format("move: PULLED %.0f studs (%.0f,%.0f,%.0f -> %.0f,%.0f,%.0f)", d, lastP.X, lastP.Y, lastP.Z, p.X, p.Y, p.Z)) end
+                if st.pulls <= 3 then A.logPullReason("walk pull") log(string.format("move: PULLED %.0f studs (%.0f,%.0f,%.0f -> %.0f,%.0f,%.0f)", d, lastP.X, lastP.Y, lastP.Z, p.X, p.Y, p.Z)) end
             end
             lastP = p
         end)
@@ -942,6 +971,7 @@ do
             local d = (r.Position - HV.lastP).Magnitude
             if d > 8 then
                 HV.pulls = HV.pulls + 1
+                A.logPullReason("hover pull")
                 log(string.format("hover: PULLED %.0f studs (%.0f,%.0f,%.0f -> %.0f,%.0f,%.0f)", d, HV.lastP.X, HV.lastP.Y, HV.lastP.Z, r.Position.X, r.Position.Y, r.Position.Z))
             end
         end
@@ -1610,6 +1640,7 @@ do
         order = 1,
         run = function()
             Q.state, lastQuest = "-", A.quest()
+            Q.questStart = os.clock()   -- a quest already running when the hub (re)started: time from now
             log("quest: start (level " .. A.level() .. ", quest now " .. lastQuest .. ")")
             while F.running and F.isAlive() do
                 local ok, err = pcall(tick)
