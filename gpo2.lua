@@ -8,6 +8,13 @@ if game.GameId ~= 648454481 then return end   -- Grand Piece Online only
 local G = (getgenv and getgenv()) or _G
 
 -- one hub only: each start takes a number, older copies (v1 or v2) are stopped
+-- (v2_41: the water platform of the copy we replace is cloned BEFORE that copy stops, so a reload on the water has no gap)
+pcall(function()
+    local old = workspace:FindFirstChild("gpo2_plat")
+    local stale = workspace:FindFirstChild("gpo2_plat_keep")
+    if stale then stale:Destroy() end
+    if old then local k = old:Clone() k.Name = "gpo2_plat_keep" k.Parent = workspace end
+end)
 G.__gpo2_seq = (G.__gpo2_seq or 0) + 1
 local MY_SEQ = G.__gpo2_seq
 if G.__gpo_hub_stop then pcall(G.__gpo_hub_stop) end   -- v1 hub, and any older v2 (v2 sets the same name)
@@ -22,7 +29,7 @@ task.wait(0.3)
 if G.__gpo2_seq ~= MY_SEQ then return end
 
 local FOLDER = "gpo2"
-local VERSION = "v2_39"
+local VERSION = "v2_41"
 local REPO_RAW = "https://raw.githubusercontent.com/moseeri01/gpohub/"
 
 -- exact build: gpo2/want.txt (written at push time) names the commit; GitHub main is cached ~5 min.
@@ -68,7 +75,7 @@ local F = {
         mode = "Quest",
         reloadOnTeleport = true,
         hover = false, hoverHeight = 7, hoverSpeed = 15, useSkills = true, autoBlock = true, retreatHp = 30, sprint = true, hoverSkipKeys = "",
-        questPick = "", fishSellEvery = 20, fishAutoSell = true, seaSpeed = 30, fishCraft = "Common", fishAutoCraft = false, fishKeepLegendary = true, fishBait = "", stopHours = 8,
+        questPick = "", fishSellEvery = 20, fishAutoSell = true, seaSpeed = 30, plat = false, fishCraft = "Common", fishAutoCraft = false, fishKeepLegendary = true, fishBait = "", stopHours = 8,
         privateCode = "", autoRejoin = true, autoStart = false, sea = "Second Sea",
         flyOver = false, ignoreStrikes = false,   -- test account only: hover over walls on a trip, keep going after a game strike
     },
@@ -1422,6 +1429,19 @@ do
             log(string.format("sea: passed a route point after %.0f s, %.0f studs", os.clock() - t0, dist0))
             return ok, why
         end
+        -- (v2_41: come down first - 20:00 the glide was switched off 470 studs up and the character fell into the sea)
+        r = A.root()
+        if r and A.hum() and A.hum().Health > 0 and A.char() == char0 and HV.seaFloor and r.Position.Y - HV.seaFloor > 14 then
+            local here, td = r.Position, os.clock()
+            log(string.format("sea: %.0f studs above the floor at the end - coming down before the hover goes off", r.Position.Y - HV.seaFloor))
+            HV.sea = true
+            while F.isAlive() and A.char() == char0 and os.clock() - td < 40 do
+                r = A.root()
+                if not r or r.Position.Y - (HV.seaFloor or r.Position.Y) < 11 then break end
+                Fi.hoverOn(Vector3.new(here.X, 0, here.Z))
+                task.wait(0.2)
+            end
+        end
         -- (v2_37: never switch the hover off over open water unless the game's Logia mode holds us - 19:07 the demo
         -- ended beside the pier and the character drowned.) No ground within 15 studs below = fly back to the start.
         r = A.root()
@@ -1594,10 +1614,11 @@ do
             end)
         end
         if PL.on and PL.part and PL.part.Parent then return end
-        local part = Instance.new("Part")
+        local keep = workspace:FindFirstChild("gpo2_plat_keep")      -- handed over by base.lua at a reload
+        local part = keep or Instance.new("Part")
         part.Name = "gpo2_plat"
         part.Anchored, part.CanCollide, part.CanQuery, part.CanTouch = true, false, false, false
-        part.Size = Vector3.new(26, 1, 26)
+        part.Size = Vector3.new(30, 14, 30)      -- (v2_41: 14 thick - at 20:01 a fall from y 470 went straight through the 1-stud part and the character drowned)
         part.Transparency = 0.75
         part.Material = Enum.Material.SmoothPlastic
         part.Parent = workspace
@@ -1627,10 +1648,22 @@ do
             local land = hit and hit.Position.Y > top - 1.2
             PL.over = land and "land" or "water"
             part.CanCollide = not land
-            part.CFrame = CFrame.new(p.X, top - 0.5, p.Z)
+            part.CFrame = CFrame.new(p.X, top - 7, p.Z)
         end)
         log("plat: on (a local part under the feet, " .. (F.cfg.platHeight or 5) .. " studs above the sea)")
     end
+    -- off: only over real ground or with the game's Logia mode on (anything else = the character sinks)
+    function Fi.platOff(force)
+        if not PL.on then return true end
+        if not force and PL.over ~= "land" and Fi.logiaOn() ~= true then return false, "over water - go on land first" end
+        if PL.conn then PL.conn:Disconnect() PL.conn = nil end
+        pcall(function() PL.part:Destroy() end)
+        PL.on, PL.part = false, nil
+        log("plat: off")
+        return true
+    end
+    -- a reload on the water, or the switch was left on: the platform is back at once
+    if workspace:FindFirstChild("gpo2_plat_keep") or F.cfg.plat then pcall(Fi.platOn) end
     -- walk on the platform to pos; on HP loss / a game strike walk back to opts.home (a point on land)
     function Fi.platWalk(pos, opts)
         opts = opts or {}
@@ -3963,7 +3996,7 @@ end)
 local SEA = { key = "out" }
 local SEA_DOCK, SEA_OUT = Vector3.new(9445, 15, -7042), Vector3.new(8800, 0, -7042)
 local SEA_PLACES = {
-    { key = "out", text = "Out of Thriller Bark (gap in the wall)" },
+    { key = "out", text = "Thriller Bark (gap in the wall)", pos = Vector3.new(8800, 0, -7042) },
     { key = "rose", text = "Rose Kingdom", pos = Vector3.new(6953, 63, 9940) },
     { key = "quest", text = "NPC of the picked quest" },
 }
@@ -3977,7 +4010,7 @@ local function seaGo()
         for _, o in ipairs(LOCALQ) do
             if o.q == F.cfg.questPick and F.quest and F.quest.npcPos then goal = F.quest.npcPos(o.n) name = o.n end
         end
-        if not goal then notify("Pick a quest in the list first (not Auto)") return end
+        if not goal then SEA.msg = "pick a quest in the list first (not Auto)" notify("Pick a quest in the list first (not Auto)") return end
     end
     local list = {}
     -- inside the wall of Thriller Bark: the dock first, then west through the gap
@@ -3985,9 +4018,13 @@ local function seaGo()
         list[#list + 1] = { pos = SEA_DOCK, name = "Thriller Bark dock" }
         list[#list + 1] = { pos = SEA_OUT, name = "gap in the wall", sea = true, keep = true, near = 25, limit = 600 }
     end
-    if goal then list[#list + 1] = { pos = goal, name = name, sea = true, near = 6, limit = 3600 } end
+    -- (v2_40: from inside the wall the gap is already in the list; from anywhere else the goal itself is the trip)
+    if goal and not (SEA.key == "out" and #list > 0) then
+        if M.flat(r.Position, goal) < 60 then SEA.msg = "already there" notify("Already there") return end
+        list[#list + 1] = { pos = goal, name = name, sea = true, near = SEA.key == "out" and 25 or 6, limit = 3600 }
+    end
     list[#list].keep = nil
-    if #list == 0 then notify("Already outside the wall") return end
+    SEA.msg = nil
     SEA.goal, SEA.name = list[#list].pos, list[#list].name
     log("sea travel (window): " .. SEA.name)
     task.spawn(function()
@@ -3999,13 +4036,21 @@ local function seaGo()
 end
 local st = UI.card(lv, 2, "Sea travel")
 UI.dropdown(st, "Go to", 84, function() return SEA_PLACES end, function() return SEA.key end, function(k) SEA.key = k end)
+-- (owner 20:12: "make it something I can switch on and off") the platform itself; Cross the water switches it on too
+UI.toggle(st, "Stand on water", function() return F.fight.plat.on end, function(on)
+    if on then F.fight.platOn() F.cfg.plat = true saveAll() SEA.msg = nil
+    else
+        local ok, why = F.fight.platOff()
+        if ok then F.cfg.plat = false saveAll() SEA.msg = nil else SEA.msg = why notify("Cannot switch off: " .. tostring(why)) end
+    end
+end)
 -- (owner 19:03: "an on / off switch is better")
 UI.toggle(st, "Cross the water", function() return F.running and F.cfg.mode == "Move test" end, function(on)
     if on then seaGo() elseif F.running and F.cfg.mode == "Move test" then F.stop() end
 end)
 UI.slider(st, "Speed", 15, 60, cfgGet("seaSpeed"), cfgSet("seaSpeed"), " /s")
 UI.info(st, "Now", function()
-    if not (F.running and F.cfg.mode == "Move test") then return "not travelling" end
+    if not (F.running and F.cfg.mode == "Move test") then return SEA.msg or "not travelling" end
     local r = A.root()
     return (SEA.name or "-") .. (r and SEA.goal and string.format("   %d studs left", M.flat(r.Position, SEA.goal)) or "")
 end)
