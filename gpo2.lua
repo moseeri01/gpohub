@@ -22,7 +22,7 @@ task.wait(0.3)
 if G.__gpo2_seq ~= MY_SEQ then return end
 
 local FOLDER = "gpo2"
-local VERSION = "v2_11"
+local VERSION = "v2_12"
 local REPO_RAW = "https://raw.githubusercontent.com/moseeri01/gpohub/"
 
 -- exact build: gpo2/want.txt (written at push time) names the commit; GitHub main is cached ~5 min.
@@ -68,6 +68,7 @@ local F = {
         mode = "Quest",
         reloadOnTeleport = true,
         hover = false, hoverHeight = 7,
+        questPick = "",
     },
 }
 function F.isAlive() return F.alive and G.__gpo2_seq == MY_SEQ end
@@ -161,7 +162,22 @@ do
     end
     watch(LP, "player")
     watch(LP.Character, "character")
-    F.conns[#F.conns + 1] = LP.CharacterAdded:Connect(function(c) watch(c, "character") end)
+    -- v2_12: deaths outside a fight (backing off, walking) were not logged anywhere (Rae test 10:02-10:07, 3 deaths)
+    F.deaths = 0
+    local lastAlivePos = nil
+    task.spawn(function()
+        while F.isAlive() do
+            local r = A.root()
+            if r then lastAlivePos = r.Position end
+            task.wait(1)
+        end
+    end)
+    F.conns[#F.conns + 1] = LP.CharacterAdded:Connect(function(c)
+        F.deaths = F.deaths + 1
+        log(string.format("DIED / respawned (%d this session)%s | status was: %s", F.deaths,
+            lastAlivePos and string.format(" | last spot %d,%d,%d", lastAlivePos.X, lastAlivePos.Y, lastAlivePos.Z) or "", tostring(F.status)))
+        watch(c, "character")
+    end)
 end
 
 -- after a pull-back: the game's MovementGuard shows "Movement corrected | <reason>" on screen (MG notification).
@@ -1232,6 +1248,11 @@ do
             F.moveList = { { pos = Vector3.new(tonumber(x), tonumber(y), tonumber(z)), name = "glide", glide = true } }
             F.cfg.mode = "Move test"
             F.start()
+        elseif cmd == "quest" then
+            -- quest <exact quest name> | quest auto
+            F.cfg.questPick = (arg == "auto") and "" or arg
+            saveAll()
+            log("quest pick = " .. (F.cfg.questPick == "" and "auto" or F.cfg.questPick))
         elseif cmd == "dumptalks" then
             -- dumptalks: decompile every ModuleScript under ReplicatedStorage.Modules.NPCInteractions (the NPC talk
             -- scripts with QuestInfo) into gpo2/talks/, plus index.txt with every name and path. Also lists NPC models
@@ -1475,7 +1496,11 @@ local LOCALQ = {
 -- Every state change is one log line ("quest: ...").
 --------------------------------------------------------------------------------
 do
-    local Q = { done = 0, skip = {}, state = "-", noMobSince = nil, questStart = nil }
+    -- skip list and deaths per quest survive a hub reload (v2_12 10:24: after a reload it went straight back to
+    -- the quest that had just killed it twice); they reset on a new server (teleport)
+    G.__gpo2_qskip = G.__gpo2_qskip or {}
+    G.__gpo2_qdeaths = G.__gpo2_qdeaths or {}
+    local Q = { done = 0, skip = G.__gpo2_qskip, deathsBy = G.__gpo2_qdeaths, state = "-", noMobSince = nil, questStart = nil }
     F.quest = Q
     local Fi = F.fight
 
@@ -1559,6 +1584,12 @@ do
             local e = entryFor(cur)
             if e then return e, "already taken" end
         end
+        -- a quest chosen by hand (remote "quest <name>" / later the Quest page) wins while its NPC is on this island
+        if F.cfg.questPick ~= "" and not (Q.skip[F.cfg.questPick] and Q.skip[F.cfg.questPick] > os.clock()) then
+            local e = entryFor(F.cfg.questPick)
+            local p = e and npcPos(e.n)
+            if p and (p - r.Position).Magnitude < 1500 then return e, "chosen" end
+        end
         local s = routeStep(A.level())
         if s and not Q.skip[s.q] or (s and Q.skip[s.q] < os.clock()) then
             local p = npcPos(s.n)
@@ -1582,9 +1613,21 @@ do
             end
         end
         if best then return best, "best quest on this island" end
+        -- v2_12 test 10:19: after a respawn at the dock nothing near Poro was loaded (the game streams far parts
+        -- out), so no quest had mobs "up" and the mode stood still. Then: the nearest quest NPC of this island
+        -- (amount > 1, not skipped); its mobs load once we are there, and the 60 s no-mob rule still applies.
+        local near, nd = nil, 1500
+        for _, o in ipairs(LOCALQ) do
+            if o.a > 1 and not (Q.skip[o.q] and Q.skip[o.q] > os.clock()) then
+                local p = npcPos(o.n)
+                if p and (p - r.Position).Magnitude < nd then near, nd = o, (p - r.Position).Magnitude end
+            end
+        end
+        if near then return near, "nearest quest NPC (mobs not loaded from here)" end
         return nil
     end
 
+    local lastQuest = ""   -- the quest seen last tick ("" after a quit, so a quit is not counted as done)
     local function takeQuest(e)
         local ok, err = pcall(function()
             local qf = require(RS.Modules.NPCInteractions.QuestFunctions)
@@ -1593,7 +1636,7 @@ do
         task.wait(1.2)
         local cur = A.quest()
         if cur == e.q then
-            Q.questStart, Q.questKills = os.clock(), 0
+            Q.questStart, Q.questKills, Q.lastTaken = os.clock(), 0, e.q
             log("quest: took " .. e.q .. " from " .. e.n .. " (" .. e.m .. " x" .. e.a .. ")")
             return true
         end
@@ -1603,20 +1646,42 @@ do
     local function quit(why, e)
         pcall(function() RS.Events.Quest:InvokeServer({ "quit" }) end)
         if e then Q.skip[e.q] = os.clock() + 300 end
+        lastQuest = ""   -- a quit is not a finished quest
         log("quest: quit " .. (e and e.q or "?") .. " - " .. why .. " (skipped 5 min)")
     end
 
-    local lastQuest = ""
     local function tick()
         local h, r = A.hum(), A.root()
         if not h or not r or h.Health <= 0 then setState("dead / respawning") task.wait(1) return end
         if A.level() <= 0 then setState("waiting for account data") task.wait(1) return end
 
-        -- a quest that just ended
         local cur, prog = A.quest()
+        -- v2_12: deaths per quest (Help Marine Scout Rae 10:09-10:13: 2 deaths in 4 min on Zombie Knights at
+        -- 675) -> 2 deaths on one quest = quit it and skip it 30 min
+        if (F.deaths or 0) > (Q.seenDeaths or 0) then
+            Q.seenDeaths = F.deaths
+            local q = (cur ~= "" and cur ~= "None") and cur or Q.lastTaken
+            if q then
+                Q.deathsBy[q] = (Q.deathsBy[q] or 0) + 1
+                log(string.format("quest: death %d on %s", Q.deathsBy[q], q))
+                if Q.deathsBy[q] >= 2 then
+                    Q.deathsBy[q] = 0
+                    if cur == q then pcall(function() RS.Events.Quest:InvokeServer({ "quit" }) end) end
+                    Q.skip[q] = os.clock() + 1800
+                    lastQuest = ""   -- a quit is not a finished quest
+                    log("quest: " .. q .. " killed us twice - quit and skip it 30 min")
+                    return
+                end
+            end
+        end
+        -- a quest that just ended
         if lastQuest ~= "" and lastQuest ~= "None" and (cur == "" or cur == "None") then
             Q.done = Q.done + 1
-            log(string.format("quest: DONE %s in %.0f s (%d done this run)", lastQuest, os.clock() - (Q.questStart or os.clock()), Q.done))
+            local e0 = entryFor(lastQuest)
+            local dt = os.clock() - (Q.questStart or os.clock())
+            local peli = tonumber(A.stat("Peli")) or 0
+            log(string.format("quest: DONE %s in %.0f s (%d done this run) | Peli now %d (+%d since last)", lastQuest, dt, Q.done, peli, peli - (Q.lastPeli or peli)))
+            Q.lastPeli = peli
         end
         lastQuest = cur
 
@@ -1672,6 +1737,7 @@ do
         order = 1,
         run = function()
             Q.state, lastQuest = "-", A.quest()
+            Q.seenDeaths = F.deaths or 0
             Q.questStart = os.clock()   -- a quest already running when the hub (re)started: time from now
             log("quest: start (level " .. A.level() .. ", quest now " .. lastQuest .. ")")
             while F.running and F.isAlive() do
