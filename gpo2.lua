@@ -29,7 +29,7 @@ task.wait(0.3)
 if G.__gpo2_seq ~= MY_SEQ then return end
 
 local FOLDER = "gpo2"
-local VERSION = "v2_50"
+local VERSION = "v2_51"
 local REPO_RAW = "https://raw.githubusercontent.com/moseeri01/gpohub/"
 
 -- exact build: gpo2/want.txt (written at push time) names the commit; GitHub main is cached ~5 min.
@@ -75,7 +75,7 @@ local F = {
         mode = "Quest",
         reloadOnTeleport = true,
         hover = false, hoverHeight = 7, hoverSpeed = 15, useSkills = true, autoBlock = true, retreatHp = 30, sprint = true, hoverSkipKeys = "",
-        questPick = "", fishSellEvery = 20, fishAutoSell = true, seaSpeed = 30, takeQuest = true, autoStats = false, gather = 1, farmWith = "Auto", plat = false, fishCraft = "Common", fishAutoCraft = false, fishKeepLegendary = true, fishBait = "", stopHours = 8,
+        questPick = "", fishSellEvery = 20, fishAutoSell = true, seaSpeed = 30, takeQuest = true, autoStats = false, autoBuy = false, gather = 1, farmWith = "Auto", plat = false, fishCraft = "Common", fishAutoCraft = false, fishKeepLegendary = true, fishBait = "", stopHours = 8,
         privateCode = "", autoRejoin = true, autoStart = false, sea = "Second Sea",
         flyOver = false, ignoreStrikes = false,   -- test account only: hover over walls on a trip, keep going after a game strike
     },
@@ -1482,6 +1482,14 @@ do
         end
         local main = STAT_OF[kind] or "Strength"
         local share = { [main] = 3, Defense = 2, Stamina = 1 }
+        -- (v2_51) Black Leg: its skills unlock with Fighting Style mastery points (55 for all) - that takes the Stamina share
+        if kind == "Melee" and A.stat("FightingStyle") == "BlackLeg" and (tonumber(A.stat("FightingStyleMastery")) or 0) < 55 then
+            share = { [main] = 3, Defense = 2, FightingStyleMastery = 1 }
+            -- the next unlock first: Sky Walk (Geppo) at 20, Party Table Kick Course (wide) at 30
+            local fm, free = tonumber(A.stat("FightingStyleMastery")) or 0, tonumber(A.stat("SkillPoints")) or 0
+            local goal = fm < 20 and 20 or (fm < 30 and 30 or nil)
+            if goal and free > 0 then return "FightingStyleMastery", math.min(free, goal - fm), kind, free end
+        end
         local total = 0
         for s in pairs(share) do total = total + (tonumber(A.stat(s)) or 0) end
         local free = tonumber(A.stat("SkillPoints")) or 0
@@ -2947,6 +2955,18 @@ do
             end
             pcall(writefile, FOLDER .. "/talks/index_npcs.txt", table.concat(lines, "\n"))
             log(string.format("dumptalks: %d modules written, %d failed, %d NPC models listed", n, fails, #lines))
+        elseif cmd == "shop" then
+            -- shop: what the buy step would do now (nothing is bought)
+            local npcs = workspace:FindFirstChild("NPCs")
+            local y = npcs and npcs:FindFirstChild("Yome")
+            local okP, cf = pcall(function() return y:GetPivot() end)
+            local sk = {}
+            pcall(function() for _, v in ipairs(RS["Stats" .. LP.Name].Skills:GetChildren()) do sk[#sk + 1] = v.Name .. "=" .. tostring(v.Value) end end)
+            local item, why = nil, "quest mode not loaded"
+            if F.quest and F.quest.shop then item, why = F.quest.shop() end
+            log(string.format("shop: Peli %s | style %s | Yome %s | next: %s | skills: %s", tostring(A.stat("Peli")), tostring(A.stat("FightingStyle")),
+                okP and cf and string.format("%d,%d,%d", cf.Position.X, cf.Position.Y, cf.Position.Z) or "not loaded",
+                item and (item.what .. " for " .. item.price) or tostring(why), table.concat(sk, ", ")))
         elseif cmd == "stats" then
             -- stats: the stat rows of the game's Statistics window and the free points
             local main = LP.PlayerGui:FindFirstChild("Statistics") and LP.PlayerGui.Statistics:FindFirstChild("Main")
@@ -3844,6 +3864,76 @@ do
     end
 
     local lastQuest = ""   -- the quest seen last tick ("" after a quit, so a quit is not counted as done)
+    -- (v2_51) shopping between quests. Black Leg: 9,000 Peli at Yome (Baratie); damage scales with Strength, its skills
+    -- unlock with Fighting Style mastery points (B-Shot 1, Coiller 10, Sky Walk = Geppo 20, Concasser, Party Table 30 ...).
+    -- Yome's own talk checks: Peli >= 9000 and FightingStyle ~= "BlackLeg"; next skill = Skills.BlackLeg.Value + 1.
+    local BL_SKILLS = { "B-Shot", "Coiller", "Sky Walk", "Concasser", "Party Table Kick Course", "Anti-Manner Kick Course" }
+    local function yomePos()
+        local npcs = workspace:FindFirstChild("NPCs")
+        local m = npcs and npcs:FindFirstChild("Yome")
+        local ok, cf = pcall(function() return m:GetPivot() end)
+        if ok and cf then F.cfg.yomeAt = { cf.Position.X, cf.Position.Y, cf.Position.Z } return cf.Position end
+        local s = F.cfg.yomeAt
+        return s and Vector3.new(s[1], s[2], s[3]) or nil
+    end
+    -- what to buy now: nil, or { what =, price =, run = function }
+    function Q.shop()
+        local peli = tonumber(A.stat("Peli")) or 0
+        local style = A.stat("FightingStyle")
+        local okT, talk = pcall(function() return require(RS.Modules.NPCInteractions.Talks.Barate.Yome) end)
+        if not okT or type(talk) ~= "table" then return nil, "Yome talk not readable" end
+        if style ~= "BlackLeg" then
+            if (F.cfg.farmWith or "Auto") ~= "Auto" and F.cfg.farmWith ~= "Melee" then return nil, "farm weapon is not Melee" end
+            if peli < 9000 then return nil, "Black Leg: " .. peli .. " / 9000 Peli" end
+            return { what = "Black Leg", price = 9000, run = talk.Talk3.excu, check = function() return A.stat("FightingStyle") == "BlackLeg" end }
+        end
+        local have = tonumber(A.stat("BlackLeg", "Skills")) or 0
+        local nextName = BL_SKILLS[have + 1]
+        if not nextName then return nil, "all Black Leg skills learned" end
+        local okM, info = pcall(function() return require(RS.Modules.Skills).GetM(nextName) end)
+        if not okM or type(info) ~= "table" then return nil, "skill data not readable" end
+        local money = tonumber(info.moneyreq) or 0
+        if peli < money then return nil, nextName .. ": " .. peli .. " / " .. money .. " Peli" end
+        if type(info.statreq) == "table" then
+            for st, need in pairs(info.statreq) do
+                if type(need) == "number" and (tonumber(A.stat(st)) or 0) < need then return nil, nextName .. " needs " .. need .. " " .. tostring(st) end
+            end
+        end
+        return { what = nextName, price = money, run = talk.learnedSkill.excu, check = function() return (tonumber(A.stat("BlackLeg", "Skills")) or 0) > have end }
+    end
+    -- (lesson 34: no game module calls from the window loop) the window row reads this text, filled here every 5 s
+    task.spawn(function()
+        while F.isAlive() do
+            local ok, item, why = pcall(Q.shop)
+            Q.shopText = ok and (item and ("next: " .. item.what .. " (" .. item.price .. " Peli)") or tostring(why)) or "-"
+            task.wait(5)
+        end
+    end)
+    -- go to Yome and buy; true when something was bought
+    local function shopTrip()
+        local item, why = Q.shop()
+        if not item then return false, why end
+        local pos = yomePos()
+        if not pos then return false, "Yome's spot is not known yet (seen only on Baratie)" end
+        setState("shopping", item.what .. " at Yome, " .. item.price .. " Peli")
+        local r = A.root()
+        if not r then return false, "no character" end
+        if far(pos) then
+            local okC, whyC = cross(pos)
+            r = A.root()
+            if not r or far(pos) then return false, "trip to Yome: " .. tostring(whyC) end
+        end
+        M.walkTo(pos, { near = 5 })
+        r = A.root()
+        if not r or M.flat(r.Position, pos) > 12 then return false, "could not reach Yome" end
+        local peli0 = tonumber(A.stat("Peli")) or 0
+        local okR, err = pcall(item.run)
+        task.wait(1.5)
+        local got = item.check()
+        log(string.format("shop: %s at Yome - %s | Peli %d -> %s%s", item.what, got and "BOUGHT" or "not bought", peli0, tostring(A.stat("Peli")), okR and "" or (" | " .. tostring(err):sub(1, 80))))
+        if not got then Q.shopWait = os.clock() + 600 end
+        return got, got and "bought" or "not bought"
+    end
     local function takeQuest(e)
         -- face the NPC first (turning on the spot)
         pcall(function()
@@ -3923,6 +4013,11 @@ do
         if not e then setState("no quest here", "no route NPC on this island and no quest mob loaded") task.wait(2) return end
         local npc = npcPos(e.n)
 
+        if (cur == "" or cur == "None") and F.cfg.autoBuy and (Q.shopWait or 0) < os.clock() then
+            local okB, bought = pcall(shopTrip)
+            if okB and bought then return end
+            if not okB then log("shop: error " .. tostring(bought):sub(1, 120)) Q.shopWait = os.clock() + 600 end
+        end
         if cur == "" or cur == "None" then
             if not npc then setState("NPC unknown", e.n) task.wait(2) return end
             local d = M.flat(r.Position, npc)
@@ -4329,6 +4424,8 @@ UI.dropdown(lb, "Farm with", 112, function()
         { key = "Sword", text = "Sword" }, { key = "Fruit", text = "Devil fruit" } }
 end, function() return F.cfg.farmWith or "Auto" end, function(k) F.cfg.farmWith = k saveAll() end)
 UI.toggle(lb, "Auto stat points", cfgGet("autoStats"), cfgSet("autoStats"))
+UI.toggle(lb, "Buy fighting style + skills", cfgGet("autoBuy"), cfgSet("autoBuy"))
+UI.info(lb, "Shop", function() return F.quest and F.quest.shopText or "-" end)
 UI.info(lb, "Next points go to", function()
     local ok, pick, n, kind, free = pcall(F.statPlan)
     if not ok or not pick then return "-" end
