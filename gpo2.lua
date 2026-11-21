@@ -29,7 +29,7 @@ task.wait(0.3)
 if G.__gpo2_seq ~= MY_SEQ then return end
 
 local FOLDER = "gpo2"
-local VERSION = "v2_49"
+local VERSION = "v2_50"
 local REPO_RAW = "https://raw.githubusercontent.com/moseeri01/gpohub/"
 
 -- exact build: gpo2/want.txt (written at push time) names the commit; GitHub main is cached ~5 min.
@@ -75,7 +75,7 @@ local F = {
         mode = "Quest",
         reloadOnTeleport = true,
         hover = false, hoverHeight = 7, hoverSpeed = 15, useSkills = true, autoBlock = true, retreatHp = 30, sprint = true, hoverSkipKeys = "",
-        questPick = "", fishSellEvery = 20, fishAutoSell = true, seaSpeed = 30, takeQuest = true, autoStats = false, farmWith = "Auto", plat = false, fishCraft = "Common", fishAutoCraft = false, fishKeepLegendary = true, fishBait = "", stopHours = 8,
+        questPick = "", fishSellEvery = 20, fishAutoSell = true, seaSpeed = 30, takeQuest = true, autoStats = false, gather = 1, farmWith = "Auto", plat = false, fishCraft = "Common", fishAutoCraft = false, fishKeepLegendary = true, fishBait = "", stopHours = 8,
         privateCode = "", autoRejoin = true, autoStart = false, sea = "Second Sea",
         flyOver = false, ignoreStrikes = false,   -- test account only: hover over walls on a trip, keep going after a game strike
     },
@@ -2216,6 +2216,41 @@ do
         end
     end
 
+    -- (v2_50, owner 11-21: "pull the mobs together when there is a wide skill") before the fight: visit up to n - 1 more
+    -- enemies of the same name within 70 studs of m, hit each once so it follows, then the caller fights m with the
+    -- pack under us. Stops when the HP is under 70 %. Returns how many were pulled.
+    function Fi.gather(m, n)
+        local hr0 = m:FindFirstChild("HumanoidRootPart")
+        if not hr0 or n < 2 then return 0 end
+        local seen, pulled = { [m] = true }, 0
+        local t0 = os.clock()
+        for _ = 2, n do
+            local h = A.hum()
+            if not F.running or not h or h.Health < h.MaxHealth * 0.7 or os.clock() - t0 > 25 then break end
+            local o = Fi.nearest(70, hr0.Position, function(x) return x.Name == m.Name and not seen[x] end)
+            if not o then break end
+            seen[o] = true
+            local ohr, oh = o:FindFirstChild("HumanoidRootPart"), o:FindFirstChildOfClass("Humanoid")
+            local hp0 = oh and oh.Health or 0
+            local t1 = os.clock()
+            while F.running and ohr and ohr.Parent and oh and oh.Health > 0 and os.clock() - t1 < 7 do
+                local r = A.root()
+                if not r then break end
+                local d = M.flat(r.Position, ohr.Position)
+                if F.cfg.hover then Fi.hoverOn(o) else A.hum():MoveTo(ohr.Position) end
+                if d <= Fi.reach + 2 then
+                    face(ohr.Position)
+                    Fi.holdWeapon()
+                    swing()
+                    task.wait(0.25)
+                    if oh.Health < hp0 then pulled = pulled + 1 break end
+                else task.wait(0.1) end
+            end
+        end
+        if pulled > 0 then log(string.format("fight: pulled %d more %s together in %.0f s", pulled, m.Name, os.clock() - t0)) end
+        return pulled
+    end
+
     -- fight one enemy until it dies, we die, Stop, or it is lost. Returns "killed" / "died" / "lost" / "stopped" / "retreat"
     function Fi.kill(m, opts)
         opts = opts or {}
@@ -3741,6 +3776,9 @@ do
     -- for the account (11-20: Auto took Zombie Knight and died). Side quests (not in the route) count as fine.
     local function tooStrong(qn)
         local lvl = A.level()
+        -- (v2_50) a quest that killed us twice is kept in the settings file with the level we had + 4: not again below that
+        local hard = F.cfg.questHard and F.cfg.questHard[qn]
+        if hard and hard > lvl then return true end
         for _, s in ipairs(ROUTE) do if s.q == qn then return s.f > lvl + 2 end end
         return false
     end
@@ -3759,7 +3797,7 @@ do
             if p then return e, "chosen" end      -- v2_27: also on another island (the tick travels there)
         end
         local s = routeStep(A.level())
-        if s and not Q.skip[s.q] or (s and Q.skip[s.q] < os.clock()) then
+        if s and not tooStrong(s.q) and (not Q.skip[s.q] or Q.skip[s.q] < os.clock()) then
             local p = npcPos(s.n)
             if p then return { q = s.q, n = s.n, m = s.m, a = s.a }, far(p) and "level route (other island)" or "level route" end
         end
@@ -3768,7 +3806,7 @@ do
         do
             local lvl, bestS = A.level(), nil
             for _, st in ipairs(ROUTE) do
-                if st.y == "Defeat" and st.b == "" and st.a > 1 and st.f <= lvl and st.f >= lvl - 12 and npcPos(st.n)
+                if st.y == "Defeat" and st.b == "" and st.a > 1 and st.f <= lvl and st.f >= lvl - 12 and npcPos(st.n) and not tooStrong(st.q)
                     and not (Q.skip[st.q] and Q.skip[st.q] > os.clock()) and (not bestS or st.f > bestS.f) then bestS = st end
             end
             if bestS then return { q = bestS.q, n = bestS.n, m = bestS.m, a = bestS.a }, "route fallback (level " .. bestS.f .. ")" end
@@ -3852,6 +3890,10 @@ do
                     Q.deathsBy[q] = 0
                     if cur == q then pcall(function() RS.Events.Quest:InvokeServer({ "quit" }) end) end
                     Q.skip[q] = os.clock() + 1800
+                    F.cfg.questHard = F.cfg.questHard or {}
+                    F.cfg.questHard[q] = A.level() + 4
+                    saveAll()
+                    log("quest: " .. q .. " is marked too hard until level " .. F.cfg.questHard[q])
                     lastQuest = ""   -- a quit is not a finished quest
                     log("quest: " .. q .. " killed us twice - quit and skip it 30 min")
                     return
@@ -3966,6 +4008,7 @@ do
         setState("fighting " .. e.m, string.format("%s %d/%d, %d up", e.q, prog, e.a, cnt))
         F.status = string.format("Quest %s %d/%d - %s", e.q, prog, e.a, m.Name)
         Fi.safeSpot = npc
+        if (F.cfg.gather or 1) > 1 then Fi.gather(m, F.cfg.gather) end
         local res = Fi.kill(m, { hover = F.cfg.hover, retreatHp = 30, backHp = 75 })
         if res == "killed" then Q.questKills = (Q.questKills or 0) + 1 end
         if res == "died" then log("quest: died fighting " .. e.m) end
@@ -4166,6 +4209,8 @@ UI.info(ses, "Deaths", function() return (F.deaths or 0) - SS.deaths0 end)
 local cb = UI.page("Combat", 3)
 local fa = UI.card(cb, 1, "Attack")
 UI.toggle(fa, "Use skills", cfgGet("useSkills"), cfgSet("useSkills"))
+UI.slider(fa, "Pull mobs together", 1, 5, cfgGet("gather"), cfgSet("gather"), "")
+UI.note(fa, "1 = one enemy at a time. 2-5 = hit that many first so they follow, then fight them as a pack (for wide skills). Needs enough HP: several enemies hit at once.")
 local fd = UI.card(cb, 2, "Defense")
 UI.toggle(fd, "Auto block", cfgGet("autoBlock"), cfgSet("autoBlock"))
 UI.stepper(fd, "Retreat below HP %", 10, 80, cfgGet("retreatHp"), cfgSet("retreatHp"), 5)
