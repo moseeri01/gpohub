@@ -29,7 +29,7 @@ task.wait(0.3)
 if G.__gpo2_seq ~= MY_SEQ then return end
 
 local FOLDER = "gpo2"
-local VERSION = "v2_53"
+local VERSION = "v2_54"
 local REPO_RAW = "https://raw.githubusercontent.com/moseeri01/gpohub/"
 
 -- exact build: gpo2/want.txt (written at push time) names the commit; GitHub main is cached ~5 min.
@@ -994,17 +994,23 @@ do
         end)
     end
 
+    -- (v2_54, owner 11-21 09:10: "still sticks to walls and doors") a 2.5-stud agent does not fit through the doors of the
+    -- Baratie (NoPath -> straight walk into the wall). Now: 2.5 first (keeps clear of corners), then 1.5, then 1.0.
     local function computePath(from, to)
         local pts, state = nil, "?"
-        pcall(function()
-            local path = PFS:CreatePath({ AgentRadius = 2.5, AgentHeight = 5, AgentCanJump = true, WaypointSpacing = 6 })
-            path:ComputeAsync(from, to)
-            state = tostring(path.Status):gsub("Enum.PathStatus.", "")
-            if path.Status == Enum.PathStatus.Success then
-                pts = {}
-                for _, w in ipairs(path:GetWaypoints()) do pts[#pts + 1] = w end
-            end
-        end)
+        for _, rad in ipairs({ 2.5, 1.5, 1.0 }) do
+            pcall(function()
+                local path = PFS:CreatePath({ AgentRadius = rad, AgentHeight = 5, AgentCanJump = true, WaypointSpacing = rad < 2 and 4 or 6 })
+                path:ComputeAsync(from, to)
+                state = tostring(path.Status):gsub("Enum.PathStatus.", "")
+                if path.Status == Enum.PathStatus.Success then
+                    pts = {}
+                    for _, w in ipairs(path:GetWaypoints()) do pts[#pts + 1] = w end
+                    if rad < 2.5 then M.narrow = (M.narrow or 0) + 1 end
+                end
+            end)
+            if pts then break end
+        end
         return pts, state
     end
 
@@ -2987,6 +2993,20 @@ do
             log(string.format("shop: Peli %s | style %s | Yome %s | next: %s | skills: %s", tostring(A.stat("Peli")), tostring(A.stat("FightingStyle")),
                 okP and cf and string.format("%d,%d,%d", cf.Position.X, cf.Position.Y, cf.Position.Z) or "not loaded",
                 item and (item.what .. " for " .. item.price) or tostring(why), table.concat(sk, ", ")))
+        elseif cmd == "hard" then
+            -- hard <level> <quest name>: do not take that quest below that level
+            local lv, qn = arg:match("^(%d+)%s+(.+)$")
+            if not lv then log("hard: use hard <level> <quest name>") return end
+            F.cfg.questHard = F.cfg.questHard or {}
+            F.cfg.questHard[qn] = tonumber(lv)
+            saveAll()
+            log("hard: " .. qn .. " not below level " .. lv)
+        elseif cmd == "unhard" then
+            -- unhard: forget the quests marked too hard and the skip list
+            F.cfg.questHard = {}
+            if F.quest then F.quest.skip = {} F.quest.deathsBy = {} end
+            saveAll()
+            log("unhard: hard-quest marks and skips cleared")
         elseif cmd == "stats" then
             -- stats: the stat rows of the game's Statistics window and the free points
             local main = LP.PlayerGui:FindFirstChild("Statistics") and LP.PlayerGui.Statistics:FindFirstChild("Main")
@@ -3828,7 +3848,7 @@ do
         local cur = A.quest()
         if cur ~= "" and cur ~= "None" then
             local e = entryFor(cur)
-            if e then return e, "already taken" end
+            if e and not tooStrong(cur) then return e, "already taken" end      -- (v2_54: a quest marked too hard is dropped, not finished)
         end
         -- a quest chosen by hand (remote "quest <name>" / later the Quest page) wins while its NPC is on this island
         if F.cfg.questPick ~= "" and not (Q.skip[F.cfg.questPick] and Q.skip[F.cfg.questPick] > os.clock()) then
@@ -3849,6 +3869,15 @@ do
                 if st.y == "Defeat" and st.b == "" and st.a > 1 and st.f <= lvl and npcPos(st.n) and not tooStrong(st.q)
                     and not (Q.skip[st.q] and Q.skip[st.q] > os.clock()) and (not bestS or st.f > bestS.f) then bestS = st end
             end
+            -- (v2_54) say once why stronger route quests were passed over
+            local why = {}
+            for _, st in ipairs(ROUTE) do
+                if st.y == "Defeat" and st.b == "" and st.a > 1 and st.f <= lvl and (not bestS or st.f > bestS.f) then
+                    why[#why + 1] = st.q .. " (" .. ((not npcPos(st.n)) and "no NPC position" or (tooStrong(st.q) and "marked too hard" or "skipped for now")) .. ")"
+                end
+            end
+            local txt = table.concat(why, ", ")
+            if #why > 0 and Q.lastWhy ~= txt then Q.lastWhy = txt log("quest: passed over " .. txt) end
             if bestS then return { q = bestS.q, n = bestS.n, m = bestS.m, a = bestS.a }, "route fallback (level " .. bestS.f .. ")" end
         end
         -- best quest of this island: NPC known and < 1500, amount > 1 (amount 1 = a boss), mob loaded near its NPC
