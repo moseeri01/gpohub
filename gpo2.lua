@@ -29,7 +29,7 @@ task.wait(0.3)
 if G.__gpo2_seq ~= MY_SEQ then return end
 
 local FOLDER = "gpo2"
-local VERSION = "v2_54"
+local VERSION = "v2_58"
 local REPO_RAW = "https://raw.githubusercontent.com/moseeri01/gpohub/"
 
 -- exact build: gpo2/want.txt (written at push time) names the commit; GitHub main is cached ~5 min.
@@ -2102,6 +2102,7 @@ do
         if not F.running or os.clock() - HV.t > 1.5 then Fi.hoverOff() return end
         if not goal then HV.lastP = A.root() and A.root().Position HV.lastT = os.clock() return end
         -- a game flight strike while hovering: hover goes off for good (until the owner turns it on again)
+        if HV.strikesSeen == nil then HV.strikesSeen = F.strikes or 0 end      -- (v2_57: strikes from before this copy do not switch it off again)
         if F.strikes > (HV.strikesSeen or 0) and F.cfg.ignoreStrikes then HV.strikesSeen = F.strikes end
         if F.strikes > (HV.strikesSeen or 0) then
             HV.strikesSeen = F.strikes
@@ -2166,7 +2167,22 @@ do
             -- guard: no LocalNotification, and at that moment the character carries the game s own FlyBypass +
             -- SpeedBypass (68) attributes = one of our own Magu skills moves the user (a lunge that lands ~18 studs
             -- on). Nothing to fix; the pull counters skip moves made under those attributes. Height stays steady.
-            HV.ap.Position = goal + Vector3.new(0, F.cfg.hoverHeight or 7, 0)
+            -- (v2_57) never more than 13 above the ground under US. 10:10 / 10:15 on the Monkey island the enemy stood up a
+            -- slope: 7 above ITS root was more than 15 above our floor -> game flight strike. Floor ray 5 times a second.
+            local want = goal + Vector3.new(0, HV.lift or F.cfg.hoverHeight or 7, 0)
+            if os.clock() - (HV.floorT or 0) > 0.2 then
+                HV.floorT = os.clock()
+                HV.rpF = HV.rpF or RaycastParams.new()
+                HV.rpF.FilterType = Enum.RaycastFilterType.Exclude
+                HV.rpF.FilterDescendantsInstances = { A.char(), workspace:FindFirstChild("Effects"), workspace:FindFirstChild("gpo2_plat") }
+                local hitF = r and workspace:Raycast(r.Position, Vector3.new(0, -60, 0), HV.rpF)
+                HV.floorUnder = hitF and hitF.Position.Y or nil
+            end
+            if HV.floorUnder and want.Y > HV.floorUnder + 13 then
+                want = Vector3.new(want.X, HV.floorUnder + 13, want.Z)
+                HV.capped = (HV.capped or 0) + 1
+            end
+            HV.ap.Position = want
         end
         if r and HV.lastP then
             local d = (r.Position - HV.lastP).Magnitude
@@ -2208,8 +2224,42 @@ do
     -- the enemy, else 150 studs straight away; and wait there until the HP is back (up to 150 s), not 40 s.
     function Fi.retreat(from, back)
         Fi.st.retreats = Fi.st.retreats + 1
-        Fi.hoverOff()
         local r = A.root()
+        if not r then return end
+        -- (v2_56) escape by height. Test 11-21 09:59-10:03 on Zou: hovering 11 above the enemy s root, 4 minutes, NOT ONE hit
+        -- taken (at 7 they hit for 39-49), no flight strike. Walking away failed 5 times today (0 studs/s, died).
+        -- So: rise to 11 where we are and wait for the HP; if the HP still falls (ranged enemies), fall back to the walk.
+        if F.cfg.hover and F.cfg.retreatUp ~= false then
+            local h0 = A.hum()
+            -- (v2_56b: 10:11 on the Monkey island the enemy stood higher up a slope - 11 above ITS root was more than 15 above
+            -- OUR floor: flight strike, hover switched off, died.) The height is taken from the ground under us: root 9.5
+            -- above the root height of someone standing here (= 12.5 above the ground, the game allows 15).
+            local rpU = RaycastParams.new()
+            rpU.FilterType = Enum.RaycastFilterType.Exclude
+            rpU.FilterDescendantsInstances = { A.char(), workspace:FindFirstChild("Effects"), workspace:FindFirstChild("gpo2_plat") }
+            local hitU = workspace:Raycast(r.Position, Vector3.new(0, -40, 0), rpU)
+            local base = Vector3.new(r.Position.X, hitU and (hitU.Position.Y + 3) or math.min(from.Y, r.Position.Y), r.Position.Z)
+            local hp0, tU, okUp = h0 and h0.Health or 0, os.clock(), true
+            local lowest = hp0
+            log(string.format("fight: low HP (%d%%), going up to 11 to heal", h0 and h0.Health / h0.MaxHealth * 100 or 0))
+            HV.lift = 9.5
+            while F.running and F.isAlive() and os.clock() - tU < 180 do
+                local h = A.hum()
+                if not h or h.Health <= 0 then okUp = false break end
+                if h.Health >= h.MaxHealth * back / 100 then break end
+                lowest = math.min(lowest, h.Health)
+                if os.clock() - tU > 4 and h.Health < hp0 - h.MaxHealth * 0.12 then okUp = false break end
+                Fi.hoverOn(base)
+                HV.target = base
+                task.wait(0.2)
+            end
+            HV.lift = nil
+            local h = A.hum()
+            log(string.format("fight: up there %.0f s, HP %d -> %d (lowest %d)%s", os.clock() - tU, hp0, h and h.Health or 0, lowest, okUp and "" or " - still losing HP, walking away instead"))
+            if okUp then return end
+        end
+        Fi.hoverOff()
+        r = A.root()
         if not r then return end
         local away = Vector3.new(r.Position.X - from.X, 0, r.Position.Z - from.Z)
         away = away.Magnitude > 1 and away.Unit or Vector3.new(1, 0, 0)
@@ -2801,6 +2851,7 @@ do
         elseif cmd == "reset" then
             -- reset: the game s own "Reset Character" (Humanoid health 0) - a new spawn. Never the Revive button.
             local h = A.hum()
+            F.testResetAt = os.clock()      -- (v2_55: not a death the quest rules may count - 08:57 it cost Help Zen)
             if h then log("reset: character reset at " .. A.posText()) h.Health = 0 end
         elseif cmd == "keys" then
             -- keys: per skill key - how it moves us and its damage; share of hover time spent in the air
@@ -3923,7 +3974,8 @@ do
         local ok, cf = pcall(function() return m:GetPivot() end)
         if ok and cf then F.cfg.yomeAt = { cf.Position.X, cf.Position.Y, cf.Position.Z } return cf.Position end
         local s = F.cfg.yomeAt
-        return s and Vector3.new(s[1], s[2], s[3]) or nil
+        -- (v2_57: seen in game 11-21 08:31 at -2969,54,-6830 on the Baratie; the saved spot was lost once)
+        return s and Vector3.new(s[1], s[2], s[3]) or (game.PlaceId == 3978370137 and Vector3.new(-2969, 54, -6830) or nil)
     end
     -- what to buy now: nil, or { what =, price =, run = function }
     function Q.shop()
@@ -3963,24 +4015,56 @@ do
         local item, why = Q.shop()
         if not item then return false, why end
         local pos = yomePos()
-        if not pos then return false, "Yome's spot is not known yet (seen only on Baratie)" end
+        -- (v2_58) the skills are bought in ONE trip: Yome is 1,500 studs from the farm spot (3 min each way). Go for a skill
+        -- only when we stand near Yome anyway, or when mastery is 30 (Party Table) and the purse holds 5,000.
+        if item.what ~= "Black Leg" and pos and A.root() and (A.root().Position - pos).Magnitude > 300
+            and not ((tonumber(A.stat("FightingStyleMastery")) or 0) >= 30 and (tonumber(A.stat("Peli")) or 0) >= 5000) then
+            return false, "waiting for 30 mastery + 5,000 Peli before the trip"
+        end
+        if not pos then log("shop: Yome spot unknown") return false, "Yome's spot is not known yet (seen only on Baratie)" end
         setState("shopping", item.what .. " at Yome, " .. item.price .. " Peli")
         local r = A.root()
         if not r then return false, "no character" end
         if far(pos) then
             local okC, whyC = cross(pos)
             r = A.root()
-            if not r or far(pos) then return false, "trip to Yome: " .. tostring(whyC) end
+            if not r or far(pos) then
+                Q.shopWait = os.clock() + 900
+                log("shop: trip to Yome failed (" .. tostring(whyC) .. ") - again in 15 min")
+                return false, "trip to Yome: " .. tostring(whyC)
+            end
         end
         M.walkTo(pos, { near = 5 })
         r = A.root()
-        if not r or M.flat(r.Position, pos) > 12 then return false, "could not reach Yome" end
+        -- (v2_57b, 10:42: reached the Baratie but not Yome (upper deck, no path) and walked straight back to Zou - it would
+        -- have gone back and forth for ever.) Not at Yome: still ask from where we stand when within 200 studs (the game
+        -- decides); every failure waits 15 min.
+        local dY = r and (r.Position - pos).Magnitude or 9999
+        if dY > 200 then
+            Q.shopWait = os.clock() + 900
+            log(string.format("shop: could not get near Yome (%.0f studs) - again in 15 min", dY))
+            return false, "could not reach Yome"
+        end
+        if dY > 12 then log(string.format("shop: %.0f studs from Yome - asking from here", dY)) end
         local peli0 = tonumber(A.stat("Peli")) or 0
         local okR, err = pcall(item.run)
         task.wait(1.5)
         local got = item.check()
         log(string.format("shop: %s at Yome - %s | Peli %d -> %s%s", item.what, got and "BOUGHT" or "not bought", peli0, tostring(A.stat("Peli")), okR and "" or (" | " .. tostring(err):sub(1, 80))))
-        if not got then Q.shopWait = os.clock() + 600 end
+        if not got then Q.shopWait = os.clock() + 900 end
+        -- (v2_58) while we stand here: everything else that can be bought now
+        local n = 0
+        while got and n < 6 do
+            n = n + 1
+            local it2 = Q.shop()
+            if not it2 then break end
+            local p0 = tonumber(A.stat("Peli")) or 0
+            pcall(it2.run)
+            task.wait(1.5)
+            local g2 = it2.check()
+            log(string.format("shop: %s at Yome - %s | Peli %d -> %s", it2.what, g2 and "BOUGHT" or "not bought", p0, tostring(A.stat("Peli"))))
+            if not g2 then break end
+        end
         return got, got and "bought" or "not bought"
     end
     -- (v2_53, owner 11-21 08:50: "every island has a save point") the spawn setter NPC "Robo" stands on each island; its own
@@ -4061,6 +4145,7 @@ do
         if (F.deaths or 0) > (Q.seenDeaths or 0) then
             Q.seenDeaths = F.deaths
             local q = (cur ~= "" and cur ~= "None") and cur or Q.lastTaken
+            if q and F.testResetAt and os.clock() - F.testResetAt < 60 then q = nil log("quest: death after a test reset - not counted") end
             if q then
                 Q.deathsBy[q] = (Q.deathsBy[q] or 0) + 1
                 log(string.format("quest: death %d on %s", Q.deathsBy[q], q))
@@ -4084,6 +4169,7 @@ do
             local e0 = entryFor(lastQuest)
             local dt = os.clock() - (Q.questStart or os.clock())
             local peli = tonumber(A.stat("Peli")) or 0
+            Q.deathsBy[lastQuest] = 0      -- (v2_55: two deaths must come without a finished quest between them)
             log(string.format("quest: DONE %s in %.0f s (%d done this run) | Peli now %d (+%d since last)", lastQuest, dt, Q.done, peli, peli - (Q.lastPeli or peli)))
             Q.lastPeli = peli
         end
