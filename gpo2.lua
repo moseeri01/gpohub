@@ -29,7 +29,7 @@ task.wait(0.3)
 if G.__gpo2_seq ~= MY_SEQ then return end
 
 local FOLDER = "gpo2"
-local VERSION = "v2_51"
+local VERSION = "v2_52"
 local REPO_RAW = "https://raw.githubusercontent.com/moseeri01/gpohub/"
 
 -- exact build: gpo2/want.txt (written at push time) names the commit; GitHub main is cached ~5 min.
@@ -1219,6 +1219,7 @@ do
         if not m:IsA("Model") then return false end
         local h, hr = m:FindFirstChildOfClass("Humanoid"), m:FindFirstChild("HumanoidRootPart")
         if not h or not hr or h.Health <= 0 then return false end
+        if Fi.badMob and Fi.badMob[m] and Fi.badMob[m] > os.clock() then return false end      -- (v2_52) could not be reached just now
         if m:FindFirstChildWhichIsA("ProximityPrompt", true) then return false end
         if Players:GetPlayerFromCharacter(m) then return false end
         return not isQuestGiver(m.Name)
@@ -2265,6 +2266,7 @@ do
         local hr, mh = m:FindFirstChild("HumanoidRootPart"), m:FindFirstChildOfClass("Humanoid")
         if not hr or not mh then return "lost" end
         local t0, lastSeenClose = os.clock(), os.clock()
+        local nearD, nearAt = math.huge, os.clock()
         -- a respawn gives a new character with full HP: v2_4 counted two deaths as "retreat", so check the object
         local char0 = A.char()
         while true do
@@ -2277,6 +2279,7 @@ do
             F.status = string.format("Fighting %s (%d hp)", m.Name, mh.Health)
 
             local d = (hr.Position - r.Position).Magnitude
+            if d < nearD - 3 or d <= Fi.reach + 2 then nearD, nearAt = d, os.clock() end
             -- v2_7: glide up to 150 studs. v2_8 test 08:47: a straight glide stuck on a cliff wall for a minute ->
             -- glide only with a clear line from us to the hover spot; else walk (the path goes around)
             local hovering = opts.hover and F.cfg.hover and (d <= 12 or (d <= 150 and Fi.clearLine(r.Position, hr.Position + Vector3.new(0, F.cfg.hoverHeight or 7, 0), m)))
@@ -2285,6 +2288,21 @@ do
                 task.wait(0.1)
             elseif d > 150 then
                 M.walkTo(hr.Position, { near = Fi.reach, limit = 15, stop = function() return mh.Health <= 0 or not m.Parent end })
+            elseif d > Fi.reach and os.clock() - nearAt > 5 then
+                -- (v2_52, 11-21 08:32-08:40: seven minutes pushing the hull of the Baratie - the pirates stood one deck up behind
+                -- a railing) 5 s without getting closer: the path walk; when that does not get closer either, leave this
+                -- enemy alone for 60 s so the caller takes another one
+                local before = d
+                M.walkTo(hr.Position, { near = Fi.reach, limit = 12, stop = function() return mh.Health <= 0 or not m.Parent end })
+                r = A.root()
+                local after = r and (hr.Position - r.Position).Magnitude or before
+                if after > before - 4 and after > Fi.reach + 2 then
+                    Fi.badMob = Fi.badMob or {}
+                    Fi.badMob[m] = os.clock() + 60
+                    log(string.format("fight: cannot reach %s (%.0f studs, path walk did not help) - left alone for 60 s", m.Name, after))
+                    return "lost"
+                end
+                nearD, nearAt = after, os.clock()
             elseif d > Fi.reach then
                 -- close chase: follow directly, re-aim every 0.15 s, up to 1.2 s
                 local c0 = os.clock()
