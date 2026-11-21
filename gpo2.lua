@@ -29,7 +29,7 @@ task.wait(0.3)
 if G.__gpo2_seq ~= MY_SEQ then return end
 
 local FOLDER = "gpo2"
-local VERSION = "v2_47"
+local VERSION = "v2_48"
 local REPO_RAW = "https://raw.githubusercontent.com/moseeri01/gpohub/"
 
 -- exact build: gpo2/want.txt (written at push time) names the commit; GitHub main is cached ~5 min.
@@ -3652,6 +3652,13 @@ do
         end
         return Fi.platWalk(npc, { near = 40, limit = 3600 })
     end
+    -- (v2_48, owner 11-21: "understand the quests better") a quest whose level range starts above our level is too strong
+    -- for the account (11-20: Auto took Zombie Knight and died). Side quests (not in the route) count as fine.
+    local function tooStrong(qn)
+        local lvl = A.level()
+        for _, s in ipairs(ROUTE) do if s.q == qn then return s.f > lvl + 2 end end
+        return false
+    end
     local function pick()
         local r = A.root()
         if not r then return nil end
@@ -3674,7 +3681,7 @@ do
         -- best quest of this island: NPC known and < 1500, amount > 1 (amount 1 = a boss), mob loaded near its NPC
         local best, bs = nil, math.huge
         for _, o in ipairs(LOCALQ) do
-            if o.a > 1 and not (Q.skip[o.q] and Q.skip[o.q] > os.clock()) then
+            if o.a > 1 and not tooStrong(o.q) and not (Q.skip[o.q] and Q.skip[o.q] > os.clock()) then
                 local p = npcPos(o.n)
                 if p then
                     local d = (p - r.Position).Magnitude
@@ -3694,7 +3701,7 @@ do
         -- (amount > 1, not skipped); its mobs load once we are there, and the 60 s no-mob rule still applies.
         local near, nd = nil, 1500
         for _, o in ipairs(LOCALQ) do
-            if o.a > 1 and not (Q.skip[o.q] and Q.skip[o.q] > os.clock()) then
+            if o.a > 1 and not tooStrong(o.q) and not (Q.skip[o.q] and Q.skip[o.q] > os.clock()) then
                 local p = npcPos(o.n)
                 if p and (p - r.Position).Magnitude < nd and not far(p) then near, nd = o, (p - r.Position).Magnitude end
             end
