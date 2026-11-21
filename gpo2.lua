@@ -29,7 +29,7 @@ task.wait(0.3)
 if G.__gpo2_seq ~= MY_SEQ then return end
 
 local FOLDER = "gpo2"
-local VERSION = "v2_52"
+local VERSION = "v2_53"
 local REPO_RAW = "https://raw.githubusercontent.com/moseeri01/gpohub/"
 
 -- exact build: gpo2/want.txt (written at push time) names the commit; GitHub main is cached ~5 min.
@@ -75,7 +75,7 @@ local F = {
         mode = "Quest",
         reloadOnTeleport = true,
         hover = false, hoverHeight = 7, hoverSpeed = 15, useSkills = true, autoBlock = true, retreatHp = 30, sprint = true, hoverSkipKeys = "",
-        questPick = "", fishSellEvery = 20, fishAutoSell = true, seaSpeed = 30, takeQuest = true, autoStats = false, autoBuy = false, gather = 1, farmWith = "Auto", plat = false, fishCraft = "Common", fishAutoCraft = false, fishKeepLegendary = true, fishBait = "", stopHours = 8,
+        questPick = "", fishSellEvery = 20, fishAutoSell = true, seaSpeed = 30, takeQuest = true, autoStats = false, setSpawn = true, autoBuy = false, gather = 1, farmWith = "Auto", plat = false, fishCraft = "Common", fishAutoCraft = false, fishKeepLegendary = true, fishBait = "", stopHours = 8,
         privateCode = "", autoRejoin = true, autoStart = false, sea = "Second Sea",
         flyOver = false, ignoreStrikes = false,   -- test account only: hover over walls on a trip, keep going after a game strike
     },
@@ -112,6 +112,8 @@ local function loadAll()
         if type(d.cfg) == "table" then
             for k, v in pairs(d.cfg) do
                 if F.cfg[k] ~= nil and type(v) == type(F.cfg[k]) then F.cfg[k] = v end
+                -- (v2_53) tables the hub fills itself have no default: hard quests, the spawn spot, Yome s spot
+                if (k == "questHard" or k == "spawnAt" or k == "yomeAt") and type(v) == "table" then F.cfg[k] = v end
             end
         end
     end)
@@ -3844,7 +3846,7 @@ do
         do
             local lvl, bestS = A.level(), nil
             for _, st in ipairs(ROUTE) do
-                if st.y == "Defeat" and st.b == "" and st.a > 1 and st.f <= lvl and st.f >= lvl - 12 and npcPos(st.n) and not tooStrong(st.q)
+                if st.y == "Defeat" and st.b == "" and st.a > 1 and st.f <= lvl and npcPos(st.n) and not tooStrong(st.q)
                     and not (Q.skip[st.q] and Q.skip[st.q] > os.clock()) and (not bestS or st.f > bestS.f) then bestS = st end
             end
             if bestS then return { q = bestS.q, n = bestS.n, m = bestS.m, a = bestS.a }, "route fallback (level " .. bestS.f .. ")" end
@@ -3952,6 +3954,45 @@ do
         if not got then Q.shopWait = os.clock() + 600 end
         return got, got and "bought" or "not bought"
     end
+    -- (v2_53, owner 11-21 08:50: "every island has a save point") the spawn setter NPC "Robo" stands on each island; its own
+    -- talk function (Talks.Misc.Robo Talk2.excu(npcModel)) sets the spawn there. Done once per Robo, between quests, so a
+    -- death no longer means the long walk back from the Town of Beginnings (08:25: 4080 studs, 4 min).
+    local function setSpawnHere()
+        local npcs = workspace:FindFirstChild("NPCs")
+        local r = A.root()
+        if not npcs or not r then return false end
+        local best, bd = nil, 1500
+        for _, m in ipairs(npcs:GetChildren()) do
+            if m.Name == "Robo" then
+                local ok, cf = pcall(function() return m:GetPivot() end)
+                if ok and cf and (cf.Position - r.Position).Magnitude < bd and not far(cf.Position) then best, bd = m, (cf.Position - r.Position).Magnitude end
+            end
+        end
+        if not best then return false end
+        local pos = best:GetPivot().Position
+        local s = F.cfg.spawnAt
+        if s and (Vector3.new(s[1], s[2], s[3]) - pos).Magnitude < 60 then return false end      -- already set at this one
+        if Q.spawnTry and Q.spawnTry.at == best and Q.spawnTry.t > os.clock() then return false end
+        setState("setting the spawn point", string.format("Robo, %.0f studs", bd))
+        M.walkTo(pos, { near = 5, limit = 40 })
+        r = A.root()
+        if not r or (r.Position - pos).Magnitude > 14 then
+            Q.spawnTry = { at = best, t = os.clock() + 300 }
+            log("spawn: could not reach Robo - again in 5 min")
+            return false
+        end
+        local ok, err = pcall(function() require(RS.Modules.NPCInteractions.Talks.Misc.Robo).Talk2.excu(best) end)
+        task.wait(1)
+        if ok then
+            F.cfg.spawnAt = { pos.X, pos.Y, pos.Z }
+            saveAll()
+            log(string.format("spawn: set at Robo %d,%d,%d (asked the game; proof = where the next respawn lands)", pos.X, pos.Y, pos.Z))
+        else
+            Q.spawnTry = { at = best, t = os.clock() + 300 }
+            log("spawn: failed - " .. tostring(err):sub(1, 100))
+        end
+        return ok
+    end
     local function takeQuest(e)
         -- face the NPC first (turning on the spot)
         pcall(function()
@@ -4031,6 +4072,7 @@ do
         if not e then setState("no quest here", "no route NPC on this island and no quest mob loaded") task.wait(2) return end
         local npc = npcPos(e.n)
 
+        if (cur == "" or cur == "None") and F.cfg.setSpawn ~= false then pcall(setSpawnHere) end
         if (cur == "" or cur == "None") and F.cfg.autoBuy and (Q.shopWait or 0) < os.clock() then
             local okB, bought = pcall(shopTrip)
             if okB and bought then return end
@@ -4435,6 +4477,7 @@ UI.dropdown(lq, "Quest", 300, questRows, function() return F.cfg.questPick end, 
     log("quest picked in the window: " .. (key == "" and "Auto" or key))
 end)
 UI.toggle(lq, "Take quests", function() return F.cfg.takeQuest ~= false end, function(on) F.cfg.takeQuest = on saveAll() end)
+UI.toggle(lq, "Set spawn on each island", function() return F.cfg.setSpawn ~= false end, function(on) F.cfg.setSpawn = on saveAll() end)
 UI.note(lq, "Off = no walk to the NPC: it only fights the mobs of the picked quest (Auto = the best quest of this island).")
 local lb = UI.card(lv, 2, "Build")
 UI.dropdown(lb, "Farm with", 112, function()
