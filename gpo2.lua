@@ -29,7 +29,7 @@ task.wait(0.3)
 if G.__gpo2_seq ~= MY_SEQ then return end
 
 local FOLDER = "gpo2"
-local VERSION = "v2_48"
+local VERSION = "v2_49"
 local REPO_RAW = "https://raw.githubusercontent.com/moseeri01/gpohub/"
 
 -- exact build: gpo2/want.txt (written at push time) names the commit; GitHub main is cached ~5 min.
@@ -188,6 +188,27 @@ do
     end
     watch(LP, "player")
     watch(LP.Character, "character")
+    -- (v2_49) HP trace: every 0.2 s; a loss of 15 %+ of max HP inside 1 s is logged with the spot and the humanoid state
+    -- (11-21: retreats start at 1-3 % HP although the fight checks 30 % about once a second - what takes it that fast?)
+    task.spawn(function()
+        local hist, lastLog = {}, 0
+        while F.isAlive() do
+            local h, r = A.hum(), A.root()
+            if h and r and h.Health > 0 then
+                local now = os.clock()
+                hist[#hist + 1] = { t = now, hp = h.Health }
+                while hist[1] and now - hist[1].t > 1 do table.remove(hist, 1) end
+                local drop = hist[1].hp - h.Health
+                if drop >= h.MaxHealth * 0.15 and now - lastLog > 1 then
+                    lastLog = now
+                    if F.fight then F.fight.bigHit = math.max(F.fight.bigHit or 0, drop) end      -- the fight backs off while 2.5 such hits are still left
+                    log(string.format("hp: -%d in 1 s (%d -> %d of %d) at %d,%d,%d | %s | %s", drop, hist[1].hp, h.Health, h.MaxHealth,
+                        r.Position.X, r.Position.Y, r.Position.Z, tostring(h:GetState()):gsub("Enum.HumanoidStateType.", ""), tostring(F.status)))
+                end
+            else hist = {} end
+            task.wait(0.2)
+        end
+    end)
     -- v2_12: deaths outside a fight (backing off, walking) were not logged anywhere (Rae test 10:02-10:07, 3 deaths)
     F.deaths = 0
     local lastAlivePos = nil
@@ -420,7 +441,8 @@ if game.PlaceId == MENU_PLACE then
     end)
 elseif F.cfg.autoStart then
     -- Start again by itself after a (re)join (set by "set autoStart true")
-    task.delay(12, function()
+    -- (v2_49: a reload in the same game (seq > 1) starts after 1.5 s - 12 s idle among the mobs cost 4 lives on 11-21)
+    task.delay(MY_SEQ > 1 and 1.5 or 12, function()
         if F.isAlive() and not F.running and F.cfg.mode ~= "Move test" and F.start then log("autostart: " .. F.cfg.mode) F.start() end
     end)
 end
@@ -984,6 +1006,8 @@ do
         return pts, state
     end
 
+    M.path = computePath
+
     -- walk to pos. opts: near (default 4), limit seconds (default 10 + 1 per 12 studs), stop() -> true to cancel.
     -- Returns ok, why.
     function M.walkTo(pos, opts)
@@ -1500,6 +1524,23 @@ do
             if hit then run = 0 lastGround = hit.Position else run = run + 30 gap = math.max(gap, run) if run >= 150 and not shore then shore = lastGround or a end end
         end
         return gap, shore      -- shore = the last ground before the first wide stretch of sea
+    end
+    -- (v2_49) is there ground above the water on the line a -> b between 40 and dist studs from a?
+    function Fi.landAhead(a, b, dist)
+        local rp = RaycastParams.new()
+        rp.FilterType = Enum.RaycastFilterType.Exclude
+        rp.FilterDescendantsInstances = { A.char(), workspace:FindFirstChild("Effects"), workspace:FindFirstChild("gpo2_plat") }
+        rp.IgnoreWater = true
+        local d = Vector3.new(b.X - a.X, 0, b.Z - a.Z)
+        if d.Magnitude < 41 then return false end
+        local len = math.min(d.Magnitude, dist)
+        d = d.Unit
+        for s = 40, len, 20 do
+            local x, z = a.X + d.X * s, a.Z + d.Z * s
+            local sea = type(HV.ocean) == "function" and HV.ocean(x, z) or 0
+            if workspace:Raycast(Vector3.new(x, sea + 400, z), Vector3.new(0, -401, 0), rp) then return true end
+        end
+        return false
     end
     function Fi.seaGlide(pos, opts)
         opts = opts or {}
@@ -2145,6 +2186,9 @@ do
     end)
 
     -- back off: walk away from the enemy and wait until HP is back above `back` %
+    -- (v2_49b) Fi.safeSpot = a point the mode knows as safe (Quest: the quest NPC). 11-21 07:36: 60 studs away was
+    -- still inside the Shell s Bandits reach - hit again and died. Now: to the safe spot when it is 70-400 studs from
+    -- the enemy, else 150 studs straight away; and wait there until the HP is back (up to 150 s), not 40 s.
     function Fi.retreat(from, back)
         Fi.st.retreats = Fi.st.retreats + 1
         Fi.hoverOff()
@@ -2153,9 +2197,19 @@ do
         local away = Vector3.new(r.Position.X - from.X, 0, r.Position.Z - from.Z)
         away = away.Magnitude > 1 and away.Unit or Vector3.new(1, 0, 0)
         log(string.format("fight: low HP (%d%%), backing off", A.hum() and A.hum().Health / A.hum().MaxHealth * 100 or 0))
-        M.walkTo(r.Position + away * 60, { near = 6, limit = 12 })
+        local safe = Fi.safeSpot
+        local sd = safe and M.flat(safe, from) or 0
+        if safe and sd >= 70 and sd <= 400 then M.walkTo(safe, { near = 8, limit = 30 })
+        else M.walkTo(r.Position + away * 150, { near = 6, limit = 20 }) end
         local t0 = os.clock()
-        while F.running and F.isAlive() and os.clock() - t0 < 40 do
+        while F.running and F.isAlive() and os.clock() - t0 < 150 do
+            -- an enemy came along: move on, away from it
+            local e, ed = Fi.nearest(40, A.root() and A.root().Position or from)
+            if e and ed and ed < 25 and A.root() then
+                local p, ep = A.root().Position, e.HumanoidRootPart.Position
+                local aw = Vector3.new(p.X - ep.X, 0, p.Z - ep.Z)
+                if aw.Magnitude > 0.5 then M.walkTo(p + aw.Unit * 80, { near = 6, limit = 10 }) end
+            end
             local h = A.hum()
             if not h or h.Health <= 0 or h.Health >= h.MaxHealth * back / 100 then break end
             task.wait(0.5)
@@ -2176,7 +2230,7 @@ do
             if A.char() ~= char0 or not h or not r or h.Health <= 0 then return "died" end
             if not m.Parent or mh.Health <= 0 then return "killed" end
             if os.clock() - t0 > (opts.limit or 90) then return "lost" end
-            if h.Health < h.MaxHealth * (F.cfg.retreatHp or opts.retreatHp or 30) / 100 then Fi.retreat(hr.Position, opts.backHp or 75) return "retreat" end
+            if h.Health < math.max(h.MaxHealth * (F.cfg.retreatHp or opts.retreatHp or 30) / 100, math.min(h.MaxHealth * 0.6, (Fi.bigHit or 0) * 2.5)) then Fi.retreat(hr.Position, opts.backHp or 75) return "retreat" end
             F.status = string.format("Fighting %s (%d hp)", m.Name, mh.Health)
 
             local d = (hr.Position - r.Position).Magnitude
@@ -3645,10 +3699,41 @@ do
     local function cross(npc)
         local r = A.root()
         if not r then return false, "no character" end
-        local okG, _, shore = pcall(Fi.seaGap, r.Position, npc)
-        if okG and shore and M.flat(r.Position, shore) > 25 then
-            local okS, whyS = M.walkTo(shore, { near = 12 })
-            log("quest: walk to the shore " .. tostring(okS and "ok" or whyS))
+        -- already on the platform over water: just walk on
+        if not (Fi.plat and Fi.plat.on and Fi.plat.over == "water") then
+            local FAN = { 0, 25, -25, 50, -50, 80, -80, 110, -110, 145, -145, 180 }
+            local to = Vector3.new(npc.X - r.Position.X, 0, npc.Z - r.Position.Z).Unit
+            local best, bc, bdeg = nil, math.huge, 0
+            for _, deg in ipairs(FAN) do
+                local rad = math.rad(deg)
+                local dir = Vector3.new(to.X * math.cos(rad) - to.Z * math.sin(rad), 0, to.X * math.sin(rad) + to.Z * math.cos(rad))
+                local okG, _, shore = pcall(Fi.seaGap, r.Position, r.Position + dir * 700)
+                if okG and shore then
+                    local cost
+                    if M.flat(r.Position, shore) < 25 then cost = 0
+                    else
+                        local pts = M.path(r.Position, shore)
+                        if pts then
+                            cost = 0
+                            for i = 2, #pts do cost = cost + (pts[i].Position - pts[i - 1].Position).Magnitude end
+                        end
+                    end
+                    if cost then
+                        cost = cost + M.flat(shore, npc)
+                        local okL, land = pcall(Fi.landAhead, shore + dir * 30, npc, 400)
+                        if okL and land then cost = cost + 800 end
+                        if cost < bc then best, bc, bdeg = shore, cost, deg end
+                    end
+                end
+            end
+            if best then
+                if M.flat(r.Position, best) > 25 then
+                    local okS, whyS = M.walkTo(best, { near = 10 })
+                    log(string.format("quest: shore %d deg off the line, %.0f studs away - walk %s", bdeg, M.flat(r.Position, best), tostring(okS and "ok" or whyS)))
+                end
+            else
+                log("quest: no shore with a path found in 12 directions - walking straight")
+            end
         end
         return Fi.platWalk(npc, { near = 40, limit = 3600 })
     end
@@ -3677,6 +3762,16 @@ do
         if s and not Q.skip[s.q] or (s and Q.skip[s.q] < os.clock()) then
             local p = npcPos(s.n)
             if p then return { q = s.q, n = s.n, m = s.m, a = s.a }, far(p) and "level route (other island)" or "level route" end
+        end
+        -- (v2_49c) the route step is skipped (it killed us twice) or unknown: the strongest EARLIER route quest we can do
+        -- (plain Defeat, no boss), also on another island. 07:42 it fell back to Help Daph (level 1) at level 25.
+        do
+            local lvl, bestS = A.level(), nil
+            for _, st in ipairs(ROUTE) do
+                if st.y == "Defeat" and st.b == "" and st.a > 1 and st.f <= lvl and st.f >= lvl - 12 and npcPos(st.n)
+                    and not (Q.skip[st.q] and Q.skip[st.q] > os.clock()) and (not bestS or st.f > bestS.f) then bestS = st end
+            end
+            if bestS then return { q = bestS.q, n = bestS.n, m = bestS.m, a = bestS.a }, "route fallback (level " .. bestS.f .. ")" end
         end
         -- best quest of this island: NPC known and < 1500, amount > 1 (amount 1 = a boss), mob loaded near its NPC
         local best, bs = nil, math.huge
@@ -3870,6 +3965,7 @@ do
         Q.noMobSince = nil
         setState("fighting " .. e.m, string.format("%s %d/%d, %d up", e.q, prog, e.a, cnt))
         F.status = string.format("Quest %s %d/%d - %s", e.q, prog, e.a, m.Name)
+        Fi.safeSpot = npc
         local res = Fi.kill(m, { hover = F.cfg.hover, retreatHp = 30, backHp = 75 })
         if res == "killed" then Q.questKills = (Q.questKills or 0) + 1 end
         if res == "died" then log("quest: died fighting " .. e.m) end
